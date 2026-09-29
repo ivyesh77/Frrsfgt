@@ -129,10 +129,12 @@ export function useArena() {
   const [state, dispatch] = useReducer(reducer, initialState);
   const userRef = useRef<ArenaUser | null>(null);
   const roomRef = useRef<RoomStatePublic | null>(null);
+  const roomsRef = useRef<RoomSummary[]>([]);
   useEffect(() => {
     userRef.current = state.user;
     roomRef.current = state.room;
-  }, [state.user, state.room]);
+    roomsRef.current = state.rooms;
+  }, [state.user, state.room, state.rooms]);
 
   // --- Socket event wiring (subscribed once for the whole Arena session) ---
   useEffect(() => {
@@ -206,15 +208,38 @@ export function useArena() {
     }
   }, []);
 
-  const createAndJoinRoom = useCallback(async (entryFee: number) => {
+  /**
+   * Casino-style "pick a stake and play" flow: seats the player at an existing open
+   * table for this entry fee if one has room, otherwise opens a fresh table — the
+   * player never has to think about individual room ids or a separate create step.
+   */
+  const playAtFee = useCallback(async (entryFee: number) => {
     if (!userRef.current) return;
     dispatch({ type: 'BUSY', busy: true });
+
+    const openTable = roomsRef.current.find(
+      (r) => r.entryFee === entryFee && r.status === 'waiting' && r.playerCount < r.maxPlayers,
+    );
+
+    if (openTable) {
+      const joinAck = await emitAck<{ ok: boolean; room?: RoomStatePublic; error?: string }>('rooms:join', {
+        userId: userRef.current.id,
+        roomId: openTable.id,
+      });
+      if (joinAck.ok && joinAck.room) {
+        dispatch({ type: 'JOIN_ROOM_SUCCESS', room: joinAck.room });
+        return;
+      }
+      // The table filled up (or vanished) between the last poll and this click —
+      // fall through and open a brand new table instead of surfacing an error.
+    }
+
     const createAck = await emitAck<{ ok: boolean; roomId?: string; error?: string }>('rooms:create', {
       gameKind: 'memoryMatch',
       entryFee,
     });
     if (!createAck.ok || !createAck.roomId) {
-      dispatch({ type: 'ERROR', error: createAck.error ?? 'Could not create room' });
+      dispatch({ type: 'ERROR', error: createAck.error ?? 'Could not start a table' });
       return;
     }
     const joinAck = await emitAck<{ ok: boolean; room?: RoomStatePublic; error?: string }>('rooms:join', {
@@ -222,21 +247,7 @@ export function useArena() {
       roomId: createAck.roomId,
     });
     if (!joinAck.ok || !joinAck.room) {
-      dispatch({ type: 'ERROR', error: joinAck.error ?? 'Could not join room' });
-      return;
-    }
-    dispatch({ type: 'JOIN_ROOM_SUCCESS', room: joinAck.room });
-  }, []);
-
-  const joinRoom = useCallback(async (roomId: string) => {
-    if (!userRef.current) return;
-    dispatch({ type: 'BUSY', busy: true });
-    const joinAck = await emitAck<{ ok: boolean; room?: RoomStatePublic; error?: string }>('rooms:join', {
-      userId: userRef.current.id,
-      roomId,
-    });
-    if (!joinAck.ok || !joinAck.room) {
-      dispatch({ type: 'ERROR', error: joinAck.error ?? 'Could not join room' });
+      dispatch({ type: 'ERROR', error: joinAck.error ?? 'Could not join the table' });
       return;
     }
     dispatch({ type: 'JOIN_ROOM_SUCCESS', room: joinAck.room });
@@ -287,8 +298,7 @@ export function useArena() {
     login,
     refreshRooms,
     topUp,
-    createAndJoinRoom,
-    joinRoom,
+    playAtFee,
     leaveRoom,
     setReady,
     submitAnswer,

@@ -115,20 +115,6 @@
   color: var(--accent-warn);
 }
 
-.arena-link {
-  background: none;
-  border: none;
-  color: var(--accent-b);
-  cursor: pointer;
-  font-size: 0.85rem;
-  padding: 4px;
-}
-
-.arena-link--back {
-  align-self: center;
-  margin-top: 8px;
-}
-
 /* ------------------------------------------------------------------ */
 /* Lobby                                                                */
 /* ------------------------------------------------------------------ */
@@ -224,12 +210,6 @@
   margin: 0;
 }
 
-.arena-section__row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
 .arena-game-feature {
   display: flex;
   align-items: center;
@@ -266,31 +246,27 @@
   margin: 0;
 }
 
-.arena-fee-row {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.arena-create-btn {
-  align-self: flex-start;
-}
-
 .arena-empty {
   color: var(--text-secondary);
   font-size: 0.9rem;
 }
 
-.arena-room-grid {
+.arena-section__lede {
+  margin: -6px 0 0;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.arena-table-grid {
   list-style: none;
   margin: 0;
   padding: 0;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   gap: 14px;
 }
 
-.arena-room-card {
+.arena-table-card {
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -299,51 +275,44 @@
   transition: transform 0.18s var(--ease-standard), box-shadow 0.18s var(--ease-standard), border-color 0.18s var(--ease-standard);
 }
 
-.arena-room-card:hover {
+.arena-table-card:hover {
   transform: translateY(-3px);
   border-color: rgba(139, 107, 255, 0.4);
   box-shadow: var(--shadow-glow-accent);
 }
 
-.arena-room-card__top {
+.arena-table-card__top {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
 }
 
-.arena-room-card__status {
-  font-size: 0.72rem;
+.arena-table-card__icon {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md);
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.arena-table-card__heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.arena-table-card__game {
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: var(--surface);
-  color: var(--text-secondary);
+  font-size: 0.95rem;
 }
 
-.arena-room-card__status--waiting {
-  color: var(--accent-success);
-  background: rgba(63, 224, 138, 0.14);
-}
-
-.arena-room-card__status--countdown {
-  color: var(--accent-warn);
-  background: rgba(255, 182, 72, 0.16);
-}
-
-.arena-room-card__status--live {
-  color: var(--accent-danger);
-  background: rgba(255, 92, 120, 0.14);
-}
-
-.arena-room-card__players {
-  font-size: 0.78rem;
+.arena-table-card__seats {
+  font-size: 0.74rem;
   color: var(--text-muted);
 }
 
-.arena-room-card__entry {
+.arena-table-card__entry {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
@@ -351,23 +320,23 @@
   border-bottom: 1px dashed var(--surface-border);
 }
 
-.arena-room-card__entry-label {
+.arena-table-card__entry-label {
   font-size: 0.78rem;
   color: var(--text-secondary);
 }
 
-.arena-room-card__entry-value {
+.arena-table-card__entry-value {
   font-weight: 700;
   font-size: 1.05rem;
 }
 
-.arena-room-card__prizes {
+.arena-table-card__prizes {
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 
-.arena-room-card__prize {
+.arena-table-card__prize {
   display: grid;
   grid-template-columns: auto 1fr auto;
   align-items: center;
@@ -378,36 +347,34 @@
   border-left: 3px solid transparent;
 }
 
-.arena-room-card__prize--gold {
+.arena-table-card__prize--gold {
   border-left-color: var(--accent-warn);
   background: linear-gradient(90deg, rgba(255, 182, 72, 0.12), transparent 70%);
 }
 
-.arena-room-card__prize--silver {
+.arena-table-card__prize--silver {
   border-left-color: rgba(200, 210, 230, 0.7);
   background: linear-gradient(90deg, rgba(200, 210, 230, 0.1), transparent 70%);
 }
 
-.arena-room-card__prize-medal {
+.arena-table-card__prize-medal {
   font-size: 1.15rem;
   line-height: 1;
 }
 
-.arena-room-card__prize-label {
+.arena-table-card__prize-label {
   font-size: 0.82rem;
   color: var(--text-secondary);
 }
 
-.arena-room-card__prize-value {
+.arena-table-card__prize-value {
   font-weight: 700;
   font-size: 0.98rem;
   color: var(--accent-success);
 }
 
-.arena-room-card__note {
-  font-size: 0.72rem;
-  color: var(--text-muted);
-  margin: -4px 0 0;
+.arena-table-card__play {
+  width: 100%;
 }
 
 /* ------------------------------------------------------------------ */

@@ -36,9 +36,8 @@ export function ArenaApp() {
         <Lobby
           user={state.user}
           rooms={state.rooms}
-          onRefresh={arena.refreshRooms}
-          onCreateRoom={arena.createAndJoinRoom}
-          onJoinRoom={arena.joinRoom}
+          busy={state.busy}
+          onPlay={arena.playAtFee}
           onTopUp={arena.topUp}
         />
       )}
