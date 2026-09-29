@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react';
-import { fetchWallet, guestLogin, topUpWallet } from './api';
+import { fetchWallet, guestLogin, topUpWallet, type AuthMode } from './api';
 import { getArenaSocket } from './socket';
 import { loadStoredIdentity, saveStoredIdentity } from './storage';
 import type {
@@ -43,6 +43,7 @@ type Action =
   | { type: 'LOGIN_START' }
   | { type: 'LOGIN_SUCCESS'; user: ArenaUser }
   | { type: 'LOGIN_ERROR'; error: string }
+  | { type: 'LOGIN_IDLE' }
   | { type: 'WALLET_REFRESHED'; user: ArenaUser }
   | { type: 'ROOMS_LIST'; rooms: RoomSummary[] }
   | { type: 'BUSY'; busy: boolean }
@@ -79,6 +80,8 @@ function reducer(state: ArenaState, action: Action): ArenaState {
       return { ...state, authenticating: false, user: action.user, stage: 'lobby', error: null };
     case 'LOGIN_ERROR':
       return { ...state, authenticating: false, error: action.error };
+    case 'LOGIN_IDLE':
+      return { ...state, authenticating: false };
     case 'WALLET_REFRESHED':
       return { ...state, user: action.user };
     case 'ROOMS_LIST':
@@ -191,14 +194,19 @@ export function useArena() {
       });
   }, []);
 
-  const login = useCallback(async (name: string) => {
+  /**
+   * Throws on failure (rather than pushing to the global toast) so the auth
+   * modal can show the error inline, next to the field it applies to.
+   */
+  const login = useCallback(async (name: string, mode: AuthMode) => {
     dispatch({ type: 'LOGIN_START' });
     try {
-      const user = await guestLogin(name);
+      const user = await guestLogin(name, mode);
       saveStoredIdentity({ userId: user.id, name: user.name });
       dispatch({ type: 'LOGIN_SUCCESS', user });
     } catch (err) {
-      dispatch({ type: 'LOGIN_ERROR', error: err instanceof Error ? err.message : 'Login failed' });
+      dispatch({ type: 'LOGIN_IDLE' });
+      throw err instanceof Error ? err : new Error('Login failed');
     }
   }, []);
 

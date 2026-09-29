@@ -6,11 +6,13 @@ async function parseOrThrow<T>(res: Response): Promise<T> {
   return body;
 }
 
-export async function guestLogin(name: string): Promise<ArenaUser> {
+export type AuthMode = 'login' | 'signup';
+
+export async function guestLogin(name: string, mode?: AuthMode): Promise<ArenaUser> {
   const res = await fetch('/api/auth/guest', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, mode }),
   });
   const body = await parseOrThrow<{ user: ArenaUser }>(res);
   return body.user;

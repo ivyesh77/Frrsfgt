@@ -31,9 +31,27 @@ app.get('/api/health', (_req, res) => {
 
 app.post('/api/auth/guest', (req, res) => {
   const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+  const mode = req.body?.mode === 'login' || req.body?.mode === 'signup' ? req.body.mode : undefined;
   if (!name) return res.status(400).json({ error: 'Name is required' });
+  if (name.length < 2) return res.status(400).json({ error: 'Name must be at least 2 characters' });
 
   const existing = findUserByName(name);
+
+  if (mode === 'login') {
+    if (!existing) {
+      return res.status(404).json({ error: 'No account found with that name. Try signing up instead.' });
+    }
+    return res.json({ user: existing });
+  }
+
+  if (mode === 'signup') {
+    if (existing) {
+      return res.status(409).json({ error: 'That name is already taken. Try logging in instead.' });
+    }
+    return res.json({ user: createGuestUser(name) });
+  }
+
+  // No mode specified (e.g. the silent auto-login from a stored identity) — keep legacy find-or-create behavior.
   const user = existing ?? createGuestUser(name);
   res.json({ user });
 });

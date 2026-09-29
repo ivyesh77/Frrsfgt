@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { useArena } from '../useArena';
-import { GuestLogin } from './GuestLogin';
+import { Home } from './Home';
 import { Lobby } from './Lobby';
 import { RoomScreen } from './RoomScreen';
 import { MatchResult } from './MatchResult';
@@ -30,7 +30,7 @@ export function ArenaApp() {
         </div>
       )}
 
-      {state.stage === 'login' && <GuestLogin busy={state.authenticating} onLogin={arena.login} />}
+      {state.stage === 'login' && <Home busy={state.authenticating} onLogin={arena.login} />}
 
       {state.stage === 'lobby' && state.user && (
         <Lobby

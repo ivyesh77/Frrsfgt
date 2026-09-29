@@ -674,3 +674,314 @@
   font-size: 0.8rem;
   color: var(--text-muted);
 }
+
+/* ------------------------------------------------------------------------ */
+/* Home / landing page                                                      */
+/* ------------------------------------------------------------------------ */
+.home-screen {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.home-nav {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 4px 18px;
+}
+
+.home-nav__brand {
+  font-family: var(--font-display);
+  font-size: clamp(1.05rem, 3vw, 1.3rem);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.home-nav__auth {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.home-nav__login {
+  background: none;
+  border: 1px solid var(--surface-border);
+  color: var(--text-primary);
+  padding: 10px 16px;
+  border-radius: var(--radius-md);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s var(--ease-standard), background 0.15s var(--ease-standard);
+}
+
+.home-nav__login:hover {
+  border-color: var(--accent-b);
+  background: var(--surface);
+}
+
+.home-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 56px;
+  padding-bottom: 40px;
+}
+
+.home-hero {
+  padding: clamp(24px, 6vw, 64px) 0 8px;
+  max-width: 760px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.home-hero__title {
+  font-family: var(--font-display);
+  font-size: clamp(1.9rem, 5.5vw, 3rem);
+  line-height: 1.15;
+  margin: 0;
+}
+
+.home-hero__subtitle {
+  color: var(--text-secondary);
+  font-size: clamp(0.95rem, 2vw, 1.1rem);
+  margin: 0;
+  max-width: 620px;
+}
+
+.home-hero__cta {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.home-hero__login-link {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0;
+}
+
+.home-hero__login-link:hover {
+  color: var(--text-primary);
+}
+
+.home-highlights {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+.home-highlight {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 18px 20px;
+  border-radius: var(--radius-lg);
+}
+
+.home-highlight__icon {
+  font-size: 1.8rem;
+  line-height: 1;
+}
+
+.home-highlight__label {
+  font-weight: 700;
+  font-size: 0.98rem;
+}
+
+.home-highlight__detail {
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+}
+
+.home-section {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.home-section__title {
+  font-family: var(--font-display);
+  font-size: clamp(1.2rem, 3vw, 1.6rem);
+  margin: 0;
+}
+
+.home-modes-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 12px;
+}
+
+.home-mode-card {
+  padding: 18px 16px;
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: transform 0.15s var(--ease-standard);
+}
+
+.home-mode-card:hover {
+  transform: translateY(-2px);
+}
+
+.home-mode-card__icon {
+  font-size: 1.6rem;
+}
+
+.home-mode-card__label {
+  font-weight: 700;
+  font-size: 0.92rem;
+}
+
+.home-mode-card__tagline {
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.home-steps {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+.home-step {
+  padding: 20px;
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.home-step__number {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  background: linear-gradient(135deg, var(--accent-a), var(--accent-b));
+  color: var(--bg-0);
+  font-size: 0.85rem;
+}
+
+.home-step__title {
+  font-weight: 700;
+}
+
+.home-step__detail {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
+.home-footer {
+  padding-top: 8px;
+  border-top: 1px solid var(--surface-border);
+}
+
+/* ------------------------------------------------------------------------ */
+/* Auth modal (Log In / Sign Up)                                            */
+/* ------------------------------------------------------------------------ */
+.auth-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(4, 3, 16, 0.6);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.auth-modal {
+  position: relative;
+  width: min(420px, 100%);
+  padding: 32px 26px 26px;
+  border-radius: var(--radius-xl);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.auth-modal__close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 6px;
+  line-height: 1;
+}
+
+.auth-modal__close:hover {
+  color: var(--text-primary);
+}
+
+.auth-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 4px;
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  border: 1px solid var(--surface-border);
+}
+
+.auth-tab {
+  flex: 1;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  font-weight: 700;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: background 0.15s var(--ease-standard), color 0.15s var(--ease-standard);
+}
+
+.auth-tab--active {
+  background: linear-gradient(135deg, var(--accent-a), var(--accent-b));
+  color: var(--bg-0);
+}
+
+.auth-error {
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 92, 120, 0.14);
+  border: 1px solid var(--accent-danger);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+}
+
+.auth-switch-link {
+  background: none;
+  border: none;
+  color: var(--accent-b);
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+  font-size: inherit;
+  text-decoration: underline;
+}

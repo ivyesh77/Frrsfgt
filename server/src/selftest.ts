@@ -42,6 +42,17 @@ async function createGuest(name: string): Promise<User> {
   return body.user;
 }
 
+/** Mode-aware auth call used to verify real login-vs-signup semantics (not just find-or-create). */
+async function authGuest(name: string, mode: 'login' | 'signup'): Promise<{ status: number; body: { user?: User; error?: string } }> {
+  const res = await fetch(`${BASE_URL}/api/auth/guest`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, mode }),
+  });
+  const body = (await res.json()) as { user?: User; error?: string };
+  return { status: res.status, body };
+}
+
 async function getWallet(userId: string): Promise<User> {
   const res = await fetch(`${BASE_URL}/api/wallet/${userId}`);
   const body = (await res.json()) as { user: User };
@@ -230,6 +241,23 @@ async function main() {
 
   assert(alice.walletBalance === 1000, 'new guest starts with a 1000 virtual-currency wallet balance');
   assert(bob.id !== alice.id && carol.id !== alice.id, 'each guest login gets a distinct user id');
+
+  // --- Login/sign-up mode semantics (not just legacy find-or-create) --------
+  {
+    // Kept under the server's 24-char name cap so the exact-name-echo assertions below are valid.
+    const freshName = `SelfFresh${suffix.toString().slice(-8)}`;
+    const signupResp = await authGuest(freshName, 'signup');
+    assert(signupResp.status === 200 && signupResp.body.user?.name === freshName, 'signing up with a fresh name succeeds and creates the account');
+
+    const dupeSignupResp = await authGuest(freshName, 'signup');
+    assert(dupeSignupResp.status === 409 && !!dupeSignupResp.body.error, 'signing up with an already-taken name is rejected (409)');
+
+    const loginResp = await authGuest(freshName, 'login');
+    assert(loginResp.status === 200 && loginResp.body.user?.id === signupResp.body.user?.id, 'logging in with an existing name returns the same account');
+
+    const missingLoginResp = await authGuest(`SelfTestNoSuchUser_${suffix}`, 'login');
+    assert(missingLoginResp.status === 404 && !!missingLoginResp.body.error, 'logging in with a name that has no account is rejected (404)');
+  }
 
   // --- Leave-before-start should fully refund the entry fee -----------------
   {
