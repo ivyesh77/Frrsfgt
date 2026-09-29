@@ -61,7 +61,7 @@ export function WalletModal({ open, user, busy, onTopUp, onWithdraw, onClose }: 
     // eslint-disable-next-line react/set-state-in-effect
     setLoading(true);
     setLoadError(null);
-    fetchWalletDetail(user.id)
+    fetchWalletDetail()
       .then(({ transactions: txs }) => {
         if (!cancelled) setTransactions(txs);
       })

@@ -1,20 +1,28 @@
 import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Button } from '../../components/common/Button';
-import type { AuthMode } from '../api';
+
+export type AuthMode = 'login' | 'signup';
 
 interface AuthModalProps {
   open: boolean;
   initialMode: AuthMode;
   busy: boolean;
-  onSubmit: (name: string, mode: AuthMode) => Promise<void>;
+  onLogin: (name: string, password: string) => Promise<void>;
+  onSignup: (name: string, password: string) => Promise<void>;
   onClose: () => void;
 }
 
-/** Production-style login/sign-up dialog: tabbed, validated, inline errors, no page navigation. */
-export function AuthModal({ open, initialMode, busy, onSubmit, onClose }: AuthModalProps) {
+const MIN_PASSWORD_LENGTH = 8;
+
+/** Production-style login/sign-up dialog: tabbed, validated, inline errors, no page
+ *  navigation. Password is a real credential now (never stored in localStorage, never
+ *  echoed back by the server) — see AUDIT_REPORT.md for why the previous name-only
+ *  "login" was an account-takeover vulnerability. */
+export function AuthModal({ open, initialMode, busy, onLogin, onSignup, onClose }: AuthModalProps) {
   const [mode, setMode] = useState<AuthMode>(initialMode);
   const [name, setName] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -29,6 +37,7 @@ export function AuthModal({ open, initialMode, busy, onSubmit, onClose }: AuthMo
       setMode(initialMode);
       setError(null);
       setName('');
+      setPassword('');
     }
   }
 
@@ -61,10 +70,19 @@ export function AuthModal({ open, initialMode, busy, onSubmit, onClose }: AuthMo
       setError('Name must be at least 2 characters.');
       return;
     }
+    if (mode === 'signup' && password.length < MIN_PASSWORD_LENGTH) {
+      setError(`Password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
+      return;
+    }
+    if (!password) {
+      setError('Password is required.');
+      return;
+    }
     setError(null);
     setSubmitting(true);
     try {
-      await onSubmit(trimmed, mode);
+      if (mode === 'login') await onLogin(trimmed, password);
+      else await onSignup(trimmed, password);
       // On success the parent unmounts this modal by switching stage — nothing else to do here.
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong. Please try again.');
@@ -139,13 +157,27 @@ export function AuthModal({ open, initialMode, busy, onSubmit, onClose }: AuthMo
                 autoComplete="username"
               />
 
+              <label className="arena-label" htmlFor="auth-password">
+                Password
+              </label>
+              <input
+                id="auth-password"
+                className="arena-input"
+                type="password"
+                value={password}
+                minLength={mode === 'signup' ? MIN_PASSWORD_LENGTH : undefined}
+                placeholder={mode === 'signup' ? `At least ${MIN_PASSWORD_LENGTH} characters` : 'Your password'}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+              />
+
               {error && (
                 <div className="auth-error" role="alert">
                   {error}
                 </div>
               )}
 
-              <Button type="submit" variant="primary" size="lg" disabled={isBusy || name.trim().length < 2}>
+              <Button type="submit" variant="primary" size="lg" disabled={isBusy || name.trim().length < 2 || !password}>
                 {isBusy ? 'Please wait…' : mode === 'login' ? 'Log In' : 'Create Account'}
               </Button>
             </form>

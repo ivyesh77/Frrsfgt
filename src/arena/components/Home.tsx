@@ -1,14 +1,14 @@
 import { useState } from 'react';
 import { motion } from 'framer-motion';
 import { Button } from '../../components/common/Button';
-import { AuthModal } from './AuthModal';
-import type { AuthMode } from '../api';
+import { AuthModal, type AuthMode } from './AuthModal';
 import { GAME_KIND_TAGLINES } from '../types';
 import gameThumbnail from '../../assets/images/memory-match-thumbnail.webp';
 
 interface HomeProps {
   busy: boolean;
-  onLogin: (name: string, mode: AuthMode) => Promise<void>;
+  onLogin: (name: string, password: string) => Promise<void>;
+  onSignup: (name: string, password: string) => Promise<void>;
 }
 
 const HIGHLIGHTS = [
@@ -24,7 +24,7 @@ const STEPS = [
 ];
 
 /** Marketing-style landing page. Login/Sign up live in the top-right corner, not as a full-page gate. */
-export function Home({ busy, onLogin }: HomeProps) {
+export function Home({ busy, onLogin, onSignup }: HomeProps) {
   const [authOpen, setAuthOpen] = useState(false);
   const [authMode, setAuthMode] = useState<AuthMode>('signup');
 
@@ -111,7 +111,14 @@ export function Home({ busy, onLogin }: HomeProps) {
         </footer>
       </main>
 
-      <AuthModal open={authOpen} initialMode={authMode} busy={busy} onSubmit={onLogin} onClose={() => setAuthOpen(false)} />
+      <AuthModal
+        open={authOpen}
+        initialMode={authMode}
+        busy={busy}
+        onLogin={onLogin}
+        onSignup={onSignup}
+        onClose={() => setAuthOpen(false)}
+      />
     </div>
   );
 }

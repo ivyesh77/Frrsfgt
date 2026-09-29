@@ -20,6 +20,13 @@ export function ArenaApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.stage]);
 
+  // Briefly checking whether an existing server session is already valid (via the httpOnly
+  // cookie) before deciding whether to show the login screen — avoids a login-screen flash
+  // for an already-authenticated visitor on page refresh.
+  if (state.bootstrapping) {
+    return <div className="arena-shell arena-shell--loading" aria-busy="true" />;
+  }
+
   return (
     <div className="arena-shell">
       {state.error && (
@@ -31,7 +38,7 @@ export function ArenaApp() {
         </div>
       )}
 
-      {state.stage === 'login' && <Home busy={state.authenticating} onLogin={arena.login} />}
+      {state.stage === 'login' && <Home busy={state.authenticating} onLogin={arena.login} onSignup={arena.signup} />}
 
       {state.stage === 'lobby' && state.user && (
         <Lobby
@@ -59,9 +66,7 @@ export function ArenaApp() {
         <RoomScreen
           user={state.user}
           room={state.room}
-          question={state.question}
-          questionReceivedAt={state.questionReceivedAt}
-          answerFeedback={state.answerFeedback}
+          round={state.round}
           onReady={arena.setReady}
           onLeave={arena.leaveRoom}
           onAnswer={arena.submitAnswer}

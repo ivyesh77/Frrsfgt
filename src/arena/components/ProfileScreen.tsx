@@ -8,7 +8,7 @@ import { coinWalletId, initialsOf, type ArenaUser, type WalletStats } from '../t
 interface ProfileScreenProps {
   user: ArenaUser;
   onBack: () => void;
-  onLogout: () => void;
+  onLogout: () => Promise<void> | void;
   onTopUp: (amount: number) => Promise<void> | void;
   onWithdraw: (amount: number) => Promise<void> | void;
 }
@@ -33,7 +33,7 @@ export function ProfileScreen({ user, onBack, onLogout, onTopUp, onWithdraw }: P
     // eslint-disable-next-line react/set-state-in-effect
     setLoading(true);
     setLoadError(null);
-    fetchWalletStats(user.id)
+    fetchWalletStats()
       .then((s) => {
         if (!cancelled) setStats(s);
       })
@@ -59,7 +59,7 @@ export function ProfileScreen({ user, onBack, onLogout, onTopUp, onWithdraw }: P
           </button>
           <h1 className="arena-title arena-title--sm">Profile</h1>
         </div>
-        <Button variant="danger" size="md" onClick={onLogout}>
+        <Button variant="danger" size="md" onClick={() => void onLogout()}>
           Log Out
         </Button>
       </header>

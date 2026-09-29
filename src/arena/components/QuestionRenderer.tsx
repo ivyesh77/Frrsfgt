@@ -1,20 +1,19 @@
 import { getAssetById } from '../../data/imageRegistry';
-import type { ArcadeQuestionPublic, MemoryMatchPayload } from '../types';
-import type { AnswerFeedback } from '../useArena';
-
-export type QuestionPhase = 'memorize' | 'answer' | 'expired';
+import type { MemoryMatchPayload, RoundOptionPublic } from '../types';
+import type { ActiveRoundView } from '../useArena';
 
 interface QuestionRendererProps {
-  question: ArcadeQuestionPublic;
-  phase: QuestionPhase;
-  answerFeedback: AnswerFeedback | null;
-  chancesLeft: number;
-  onAnswer: (index: number) => void;
+  round: ActiveRoundView;
+  /** A live `Date.now()` sample from the parent's ticking clock — used only to decide
+   *  when the "too fast to be human" answer window has passed and to drive the countdown
+   *  visuals. The server holds and enforces the real deadlines; this is display-only. */
+  now: number;
+  onAnswer: (optionToken: string) => void;
 }
 
-function PromptPanel({ question }: { question: ArcadeQuestionPublic }) {
-  if (question.prompt === null || question.prompt === undefined) return null;
-  const asset = getAssetById((question.prompt as MemoryMatchPayload).assetId);
+function PromptPanel({ prompt }: { prompt: unknown }) {
+  if (prompt === null || prompt === undefined) return null;
+  const asset = getAssetById((prompt as MemoryMatchPayload).assetId);
   return (
     <div className="arena-prompt arena-prompt--image">
       {asset && <img src={asset.src} alt={asset.name} draggable={false} />}
@@ -22,31 +21,33 @@ function PromptPanel({ question }: { question: ArcadeQuestionPublic }) {
   );
 }
 
-function OptionContent({ option }: { option: unknown }) {
-  const asset = getAssetById((option as MemoryMatchPayload).assetId);
+function OptionContent({ option }: { option: RoundOptionPublic }) {
+  const asset = getAssetById(option.assetId);
   return asset ? <img src={asset.src} alt={asset.name} draggable={false} /> : null;
 }
 
-export function QuestionRenderer({ question, phase, answerFeedback, chancesLeft, onAnswer }: QuestionRendererProps) {
-  const canAnswer = phase === 'answer' && chancesLeft > 0 && !answerFeedback;
-  const showPrompt = question.prompt !== null && (question.memorizeMs === 0 || phase === 'memorize');
+export function QuestionRenderer({ round, now, onAnswer }: QuestionRendererProps) {
+  const isMemorizing = round.options === null;
+  const isResolved = round.resolution !== null;
+  // The server is the sole authority on timing — this only prevents the client from ever
+  // firing a request it already knows would be rejected as "too fast" (see rooms.ts
+  // MIN_REACTION_MS); it changes nothing about what the server actually enforces.
+  const withinReactionWindow = round.minAnswerAt !== null && now < round.minAnswerAt;
+  const canAnswer = !isMemorizing && !isResolved && !withinReactionWindow;
 
   return (
     <div className="arena-question">
-      {phase === 'memorize' && question.memorizeMs > 0 && (
-        <div className="arena-question__hint">Memorize…</div>
-      )}
-      {showPrompt && <PromptPanel question={question} />}
+      {isMemorizing && <div className="arena-question__hint">Memorize…</div>}
+      {isMemorizing && <PromptPanel prompt={round.prompt} />}
 
-      {phase !== 'memorize' && (
+      {!isMemorizing && round.options && (
         <div className="arena-options-grid arena-options-grid--memoryMatch">
-          {question.options.map((option, index) => {
-            const isCorrectReveal = answerFeedback && answerFeedback.correctIndex === index;
-            const isWrongPick =
-              answerFeedback && !answerFeedback.correct && answerFeedback.correctIndex !== index;
+          {round.options.map((option) => {
+            const isCorrectReveal = isResolved && round.resolution!.correctToken === option.token;
+            const isWrongPick = isResolved && !round.resolution!.correct && round.resolution!.correctToken !== option.token;
             return (
               <button
-                key={index}
+                key={option.token}
                 type="button"
                 className={[
                   'arena-option',
@@ -56,7 +57,7 @@ export function QuestionRenderer({ question, phase, answerFeedback, chancesLeft,
                   .filter(Boolean)
                   .join(' ')}
                 disabled={!canAnswer}
-                onClick={() => onAnswer(index)}
+                onClick={() => onAnswer(option.token)}
               >
                 <OptionContent option={option} />
               </button>

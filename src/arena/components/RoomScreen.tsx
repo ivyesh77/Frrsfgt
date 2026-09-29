@@ -1,37 +1,26 @@
 import { useMemo } from 'react';
 import { Button } from '../../components/common/Button';
-import { GAME_KIND_LABELS, roomFormatMeta, type ArcadeQuestionPublic, type ArenaUser, type RoomStatePublic } from '../types';
-import type { AnswerFeedback } from '../useArena';
+import { GAME_KIND_LABELS, roomFormatMeta, type ArenaUser, type RoomStatePublic } from '../types';
+import type { ActiveRoundView } from '../useArena';
 import { useNow } from '../useNow';
-import { QuestionRenderer, type QuestionPhase } from './QuestionRenderer';
+import { QuestionRenderer } from './QuestionRenderer';
 
 interface RoomScreenProps {
   user: ArenaUser;
   room: RoomStatePublic;
-  question: ArcadeQuestionPublic | null;
-  questionReceivedAt: number | null;
-  answerFeedback: AnswerFeedback | null;
+  round: ActiveRoundView | null;
   onReady: () => void;
   onLeave: () => void;
-  onAnswer: (index: number) => void;
+  onAnswer: (optionToken: string) => void;
 }
 
 function formatSeconds(ms: number): string {
   return Math.max(0, Math.ceil(ms / 1000)).toString();
 }
 
-export function RoomScreen({
-  user,
-  room,
-  question,
-  questionReceivedAt,
-  answerFeedback,
-  onReady,
-  onLeave,
-  onAnswer,
-}: RoomScreenProps) {
+export function RoomScreen({ user, room, round, onReady, onLeave, onAnswer }: RoomScreenProps) {
   const now = useNow(100);
-  const me = room.players.find((p) => p.userId === user.id);
+  const me = room.players.find((p) => p.id === user.id);
   const isReady = me?.ready ?? false;
   const formatMeta = roomFormatMeta(room.format);
 
@@ -39,15 +28,6 @@ export function RoomScreen({
     () => [...room.players].sort((a, b) => b.score - a.score || a.chancesLeft - b.chancesLeft),
     [room.players],
   );
-
-  let phase: QuestionPhase = 'expired';
-  if (question && questionReceivedAt !== null) {
-    const memorizeEndsAt = questionReceivedAt + question.memorizeMs;
-    const answerEndsAt = memorizeEndsAt + question.answerMs;
-    if (now < memorizeEndsAt) phase = 'memorize';
-    else if (now < answerEndsAt) phase = 'answer';
-    else phase = 'expired';
-  }
 
   return (
     <div className="arena-room no-select">
@@ -101,16 +81,8 @@ export function RoomScreen({
               {me && me.chancesLeft <= 0 && (
                 <p className="arena-empty">You are out of chances — waiting for the timer to end…</p>
               )}
-              {me && me.chancesLeft > 0 && !question && <p className="arena-empty">Loading next question…</p>}
-              {me && me.chancesLeft > 0 && question && (
-                <QuestionRenderer
-                  question={question}
-                  phase={phase}
-                  answerFeedback={answerFeedback}
-                  chancesLeft={me.chancesLeft}
-                  onAnswer={onAnswer}
-                />
-              )}
+              {me && me.chancesLeft > 0 && !round && <p className="arena-empty">Loading next round…</p>}
+              {me && me.chancesLeft > 0 && round && <QuestionRenderer round={round} now={now} onAnswer={onAnswer} />}
             </>
           )}
 
@@ -126,7 +98,7 @@ export function RoomScreen({
           <h2 className="arena-section__title">Players</h2>
           <ul>
             {leaderboard.map((p, i) => (
-              <li key={p.userId} className={p.userId === user.id ? 'arena-leaderboard__self' : ''}>
+              <li key={p.id} className={p.id === user.id ? 'arena-leaderboard__self' : ''}>
                 <span className="arena-leaderboard__rank">{i + 1}</span>
                 <span className="arena-leaderboard__name">
                   {p.name}

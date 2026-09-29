@@ -24,6 +24,11 @@ export const GAME_KIND_TAGLINES: Record<GameKind, string> = {
 
 export const ENTRY_FEE_TIERS = [10, 50, 100, 500, 1000, 5000, 10000] as const;
 
+/** The minimum time a real human can plausibly take to react — mirrors server/src/types.ts
+ *  MIN_REACTION_MS. The server is the sole authority that actually enforces this; the
+ *  client only uses it to avoid submitting an answer the server would reject anyway. */
+export const MIN_REACTION_MS = 150;
+
 /** Mirrors server/src/types.ts — every room is one of two fixed formats that only
  *  start once completely full: a 1v1 duel (winner takes the entire winner pool,
  *  loser gets nothing) or a 4-player squad match (top 2 scorers split the pool
@@ -73,6 +78,9 @@ export function splitWinnerPayout(winnerPayoutTotal: number): { first: number; s
   return { first, second: winnerPayoutTotal - first };
 }
 
+/** The only user shape the server ever sends — a real account with a hashed password
+ *  behind it now, never a client-conjured "guest". Never carries a password or any other
+ *  secret. */
 export interface ArenaUser {
   id: string;
   name: string;
@@ -80,19 +88,14 @@ export interface ArenaUser {
   createdAt: number;
 }
 
-export interface ArcadeQuestionPublic {
-  id: string;
-  kind: GameKind;
-  memorizeMs: number;
-  answerMs: number;
-  prompt: unknown;
-  options: unknown[];
-}
-
 export type RoomStatus = 'waiting' | 'countdown' | 'live' | 'finished';
 
+/** `id` is the viewer's OWN real account id if this entry is them, otherwise a room-scoped
+ *  opaque id — the server never reveals another occupant's real account id (see
+ *  server/src/rooms.ts toPlayerPublic). Never assume `id` is a stable account identifier
+ *  for anyone except yourself. */
 export interface RoomPlayerPublic {
-  userId: string;
+  id: string;
   name: string;
   ready: boolean;
   score: number;
@@ -122,8 +125,9 @@ export interface RoomStatePublic {
   matchEndsAt: number | null;
 }
 
+/** Same self-vs-opaque-id rule as RoomPlayerPublic. */
 export interface MatchResultPlayer {
-  userId: string;
+  id: string;
   name: string;
   score: number;
   correct: number;
@@ -149,8 +153,47 @@ export interface MemoryMatchPayload {
   assetId: string;
 }
 
+// ---------------------------------------------------------------------------
+// Two-phase, server-timed round protocol. A round always arrives as two SEPARATE events
+// instead of one payload containing both the target and the options — see
+// server/src/rooms.ts and AUDIT_REPORT.md for why the old single-payload shape leaked the
+// correct answer. The client renders whatever it's given and submits only an opaque
+// `token`; it never computes or asserts correctness itself.
+// ---------------------------------------------------------------------------
+export interface RoundOptionPublic {
+  /** Opaque, freshly-random per round — this is what gets echoed back in match:answer.
+   *  It is NOT an index and NOT the asset id, and carries no information about whether
+   *  this option is correct. */
+  token: string;
+  assetId: string;
+}
+
+export interface RoundRevealPublic {
+  roundId: string;
+  kind: GameKind;
+  memorizeMs: number;
+  /** Authoritative — only used for the countdown animation; the server enforces the real deadline. */
+  revealDeadline: number;
+  prompt: unknown;
+}
+
+export interface RoundOptionsPublic {
+  roundId: string;
+  kind: GameKind;
+  answerMs: number;
+  answerDeadline: number;
+  minAnswerAt: number;
+  options: RoundOptionPublic[];
+}
+
+export interface RoundTimeoutPublic {
+  roundId: string;
+  correctToken: string;
+}
+
 // --- Wallet ledger --------------------------------------------------------
 export type TransactionType = 'topup' | 'withdrawal' | 'entry_fee' | 'refund' | 'payout' | 'platform_fee' | 'signup_bonus';
+export type TransactionStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled' | 'expired' | 'reversed';
 
 export interface Transaction {
   id: string;
@@ -160,6 +203,7 @@ export interface Transaction {
   roomId?: string;
   balanceAfter: number;
   timestamp: number;
+  status: TransactionStatus;
 }
 
 /** Lifetime profile stats derived from a user's full transaction ledger — powers the
@@ -176,7 +220,7 @@ export interface WalletStats {
   netGameProfit: number;
 }
 
-/** A stable, wallet-address-style id for flavor — purely cosmetic, derived from the guest
+/** A stable, wallet-address-style id for flavor — purely cosmetic, derived from the
  *  account id (never a real crypto address; this product never touches real currency). */
 export function coinWalletId(userId: string): string {
   return `ARC-${userId.slice(0, 10).toUpperCase()}`;

@@ -10,7 +10,7 @@ interface MatchResultProps {
 
 export function MatchResult({ result, user, onBackToLobby }: MatchResultProps) {
   const ranked = [...result.results].sort((a, b) => b.score - a.score);
-  const myResult = result.results.find((r) => r.userId === user.id);
+  const myResult = result.results.find((r) => r.id === user.id);
 
   return (
     <div className="arena-centered no-select">
@@ -41,7 +41,7 @@ export function MatchResult({ result, user, onBackToLobby }: MatchResultProps) {
 
         <ul className="arena-result-list">
           {ranked.map((r, i) => (
-            <li key={r.userId} className={r.userId === user.id ? 'arena-result-list__self' : ''}>
+            <li key={r.id} className={r.id === user.id ? 'arena-result-list__self' : ''}>
               <span className="arena-result-list__rank">#{i + 1}</span>
               <span className="arena-result-list__name">
                 {r.name}
