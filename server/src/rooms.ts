@@ -265,7 +265,7 @@ export class RoomManager {
     room.clearTimers();
 
     const players = [...room.players.values()];
-    const { ranked, isVoidMatch, winnerIds, platformCut, winnerPayoutTotal, perWinnerPayout } = computeMatchPayout(
+    const { ranked, isVoidMatch, winnerIds, platformCut, winnerPayoutTotal, payoutByUserId } = computeMatchPayout(
       room.pool,
       players.map((p) => ({ userId: p.userId, score: p.score, wrong: p.wrong, lastAnswerAt: p.lastAnswerAt })),
     );
@@ -274,7 +274,7 @@ export class RoomManager {
       const p = room.players.get(ranked_p.userId);
       if (!p) throw new Error('Ranked player missing from room'); // invariant: ranked() only reorders the same player set
       const isWinner = winnerIds.has(p.userId);
-      const payout = isVoidMatch ? room.entryFee : isWinner ? perWinnerPayout : 0;
+      const payout = isVoidMatch ? room.entryFee : (payoutByUserId.get(p.userId) ?? 0);
       if (isVoidMatch) refundEntryFee(p.userId, room.entryFee, room.id);
       else if (payout > 0) creditPayout(p.userId, payout, room.id);
       return {

@@ -6,8 +6,8 @@ import {
   GAME_KIND_TAGLINES,
   ENTRY_FEE_TIERS,
   MAX_PLAYERS_PER_ROOM,
-  MIN_PLAYERS_TO_START,
   winnerShareOf,
+  splitWinnerPayout,
   type ArenaUser,
   type RoomSummary,
 } from '../types';
@@ -26,7 +26,7 @@ export function Lobby({ user, rooms, onRefresh, onCreateRoom, onJoinRoom, onTopU
   const [selectedFee, setSelectedFee] = useState<number>(ENTRY_FEE_TIERS[0]);
   const [walletOpen, setWalletOpen] = useState(false);
 
-  const selectedMaxWin = winnerShareOf(selectedFee * MAX_PLAYERS_PER_ROOM);
+  const selectedSplit = splitWinnerPayout(winnerShareOf(selectedFee * MAX_PLAYERS_PER_ROOM));
 
   return (
     <div className="arena-lobby no-select">
@@ -65,8 +65,9 @@ export function Lobby({ user, rooms, onRefresh, onCreateRoom, onJoinRoom, onTopU
           ))}
         </div>
         <p className="arena-fineprint">
-          Win up to <strong>🪙 {selectedMaxWin.toLocaleString()}</strong> if the room fills up (80% of the pool goes
-          to the winner).
+          Rooms are 4 players. Top 2 scores win the pool — 🥇 1st gets{' '}
+          <strong>🪙 {selectedSplit.first.toLocaleString()}</strong>, 🥈 2nd gets{' '}
+          <strong>🪙 {selectedSplit.second.toLocaleString()}</strong>. The bottom 2 win nothing.
         </p>
         <Button
           variant="primary"
@@ -92,9 +93,8 @@ export function Lobby({ user, rooms, onRefresh, onCreateRoom, onJoinRoom, onTopU
         {rooms.length === 0 && <p className="arena-empty">No open rooms yet. Create one above to get started.</p>}
         <ul className="arena-room-grid">
           {rooms.map((room) => {
-            const currentPool = room.entryFee * room.playerCount;
-            const currentWin = winnerShareOf(currentPool);
-            const maxWin = winnerShareOf(room.entryFee * room.maxPlayers);
+            const fullPool = room.entryFee * room.maxPlayers;
+            const split = splitWinnerPayout(winnerShareOf(fullPool));
             const joinable = room.status === 'waiting' && user.walletBalance >= room.entryFee;
             return (
               <motion.li
@@ -112,20 +112,26 @@ export function Lobby({ user, rooms, onRefresh, onCreateRoom, onJoinRoom, onTopU
                   </span>
                 </div>
 
+                <div className="arena-room-card__stat arena-room-card__stat--fee">
+                  <span className="arena-room-card__stat-label">Entry fee</span>
+                  <span className="arena-room-card__stat-value">🪙 {room.entryFee.toLocaleString()}</span>
+                </div>
+
                 <div className="arena-room-card__stats">
-                  <div className="arena-room-card__stat">
-                    <span className="arena-room-card__stat-label">Entry fee</span>
-                    <span className="arena-room-card__stat-value">🪙 {room.entryFee.toLocaleString()}</span>
-                  </div>
                   <div className="arena-room-card__stat arena-room-card__stat--win">
-                    <span className="arena-room-card__stat-label">
-                      {room.playerCount >= MIN_PLAYERS_TO_START ? 'Win amount' : 'Win up to'}
-                    </span>
+                    <span className="arena-room-card__stat-label">🥇 1st place</span>
                     <span className="arena-room-card__stat-value arena-room-card__stat-value--win">
-                      🪙 {(room.playerCount >= MIN_PLAYERS_TO_START ? currentWin : maxWin).toLocaleString()}
+                      🪙 {split.first.toLocaleString()}
+                    </span>
+                  </div>
+                  <div className="arena-room-card__stat arena-room-card__stat--win2">
+                    <span className="arena-room-card__stat-label">🥈 2nd place</span>
+                    <span className="arena-room-card__stat-value arena-room-card__stat-value--win">
+                      🪙 {split.second.toLocaleString()}
                     </span>
                   </div>
                 </div>
+                <p className="arena-room-card__note">Top 2 scores win · bottom 2 win nothing</p>
 
                 <Button variant="secondary" size="md" disabled={!joinable} onClick={() => onJoinRoom(room.id)}>
                   {room.status !== 'waiting' ? 'In progress' : 'Join'}

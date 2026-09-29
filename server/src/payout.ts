@@ -1,4 +1,4 @@
-import { PLATFORM_FEE_RATE } from './types.js';
+import { FIRST_PLACE_SHARE, PLATFORM_FEE_RATE } from './types.js';
 
 export interface PayoutInputPlayer {
   userId: string;
@@ -15,8 +15,11 @@ export interface PayoutBreakdown {
   winnerIds: Set<string>;
   platformCut: number;
   winnerPayoutTotal: number;
-  /** Equal split of winnerPayoutTotal across winnerIds (floor — any remainder from an odd split is simply never claimed, never lost from the ledger since it's not credited to anyone but also never taken as extra platform revenue). */
-  perWinnerPayout: number;
+  /** Exact payout per winner, keyed by userId. With two winners, 1st place gets
+   *  FIRST_PLACE_SHARE of the winner pool and 2nd place gets the exact remainder
+   *  (so the full winnerPayoutTotal is always allocated, never rounded away). If
+   *  only one player actually scored, that sole scorer takes the entire pool alone. */
+  payoutByUserId: Map<string, number>;
 }
 
 /**
@@ -25,6 +28,12 @@ export interface PayoutBreakdown {
  * be unit-tested directly with contrived scores instead of depending on the
  * outcome of live (randomized) gameplay, which made an earlier version of
  * this test suite occasionally flaky.
+ *
+ * Rooms are fixed 4-player matches: the top 2 scorers win and split the
+ * winner pool (60/40, best to worst); the bottom 2 win nothing and are not
+ * refunded (their entry fee is already part of the pool the winners split).
+ * A player who never scores a single point is never eligible to win, even if
+ * their rank would otherwise place them 2nd among non-scorers.
  */
 export function computeMatchPayout(pool: number, players: PayoutInputPlayer[]): PayoutBreakdown {
   const ranked = players.slice().sort((a, b) => {
@@ -35,24 +44,24 @@ export function computeMatchPayout(pool: number, players: PayoutInputPlayer[]): 
     return at - bt;
   });
 
-  const top = ranked[0];
-  const isVoidMatch = !top || top.score <= 0;
-  // Winners are only ever split across multiple players if they are tied on EVERY
-  // tie-break level (score, then wrong count, then last-answer timestamp) — a tie-break
-  // that resolves a difference at any level produces a single winner, not a split.
-  const winners =
-    isVoidMatch || !top
-      ? []
-      : ranked.filter(
-          (p) =>
-            p.score === top.score &&
-            p.wrong === top.wrong &&
-            (p.lastAnswerAt ?? Number.MAX_SAFE_INTEGER) === (top.lastAnswerAt ?? Number.MAX_SAFE_INTEGER),
-        );
+  const scorers = ranked.filter((p) => p.score > 0);
+  const isVoidMatch = scorers.length === 0;
 
   const platformCut = isVoidMatch ? 0 : Math.round(pool * PLATFORM_FEE_RATE);
   const winnerPayoutTotal = pool - platformCut;
-  const perWinnerPayout = winners.length > 0 ? Math.floor(winnerPayoutTotal / winners.length) : 0;
+
+  // Top 2 among players who actually scored take the pool. If only one player
+  // scored, they take all of it — a 0-score player never gets paid.
+  const winners = isVoidMatch ? [] : scorers.slice(0, 2);
+  const payoutByUserId = new Map<string, number>();
+  const [first, second] = winners;
+  if (first && !second) {
+    payoutByUserId.set(first.userId, winnerPayoutTotal);
+  } else if (first && second) {
+    const firstPlacePayout = Math.round(winnerPayoutTotal * FIRST_PLACE_SHARE);
+    payoutByUserId.set(first.userId, firstPlacePayout);
+    payoutByUserId.set(second.userId, winnerPayoutTotal - firstPlacePayout);
+  }
 
   return {
     ranked,
@@ -60,6 +69,6 @@ export function computeMatchPayout(pool: number, players: PayoutInputPlayer[]): 
     winnerIds: new Set(winners.map((w) => w.userId)),
     platformCut,
     winnerPayoutTotal,
-    perWinnerPayout,
+    payoutByUserId,
   };
 }

@@ -135,28 +135,40 @@ function assertOnce(condition: boolean, message: string): void {
  * independent of the live-match integration test further down.
  */
 function testPayoutMath(): void {
-  // Clear single winner.
+  // Standard 4-player room: top 2 scorers win and split the pool 60/40, bottom 2 win nothing.
   {
-    const r = computeMatchPayout(300, [
+    const r = computeMatchPayout(400, [
       { userId: 'a', score: 5, wrong: 1, lastAnswerAt: 100 },
       { userId: 'b', score: 3, wrong: 2, lastAnswerAt: 200 },
-      { userId: 'c', score: 0, wrong: 5, lastAnswerAt: 300 },
+      { userId: 'c', score: 1, wrong: 4, lastAnswerAt: 300 },
+      { userId: 'd', score: 0, wrong: 5, lastAnswerAt: 400 },
     ]);
     assertOnce(!r.isVoidMatch, 'payout: a clear leader is never treated as a void match');
-    assertOnce(r.winnerIds.has('a') && r.winnerIds.size === 1, 'payout: the highest scorer is the sole winner');
-    assertOnce(r.platformCut === 60, 'payout: platform cut is exactly 20% of the pool (300 -> 60)');
-    assertOnce(r.winnerPayoutTotal === 240, 'payout: winner pool is exactly 80% of the pool (300 -> 240)');
-    assertOnce(r.platformCut + r.winnerPayoutTotal === 300, 'payout: cut + winner pool reconstructs the pool exactly');
-    assertOnce(r.perWinnerPayout === 240, 'payout: sole winner receives the entire winner pool');
+    assertOnce(r.winnerIds.size === 2 && r.winnerIds.has('a') && r.winnerIds.has('b'), 'payout: the top 2 scorers are the winners');
+    assertOnce(!r.winnerIds.has('c') && !r.winnerIds.has('d'), 'payout: 3rd and 4th place win nothing');
+    assertOnce(r.platformCut === 80, 'payout: platform cut is exactly 20% of the pool (400 -> 80)');
+    assertOnce(r.winnerPayoutTotal === 320, 'payout: winner pool is exactly 80% of the pool (400 -> 320)');
+    assertOnce(r.platformCut + r.winnerPayoutTotal === 400, 'payout: cut + winner pool reconstructs the pool exactly');
+    assertOnce(r.payoutByUserId.get('a') === 192, 'payout: 1st place gets 60% of the winner pool (320 -> 192)');
+    assertOnce(r.payoutByUserId.get('b') === 128, 'payout: 2nd place gets the exact remainder (320 - 192 = 128)');
+    assertOnce(
+      (r.payoutByUserId.get('a') ?? 0) + (r.payoutByUserId.get('b') ?? 0) === r.winnerPayoutTotal,
+      'payout: 1st + 2nd payouts exactly reconstruct the winner pool (no rounding leak)',
+    );
+    assertOnce((r.payoutByUserId.get('c') ?? 0) === 0 && (r.payoutByUserId.get('d') ?? 0) === 0, 'payout: non-winners are owed nothing');
   }
 
-  // Tie on score, broken by fewer wrong answers.
+  // Tie on score for 1st place, broken by fewer wrong answers.
   {
     const r = computeMatchPayout(200, [
       { userId: 'a', score: 4, wrong: 3, lastAnswerAt: 500 },
       { userId: 'b', score: 4, wrong: 1, lastAnswerAt: 100 },
     ]);
-    assertOnce(r.winnerIds.has('b') && r.winnerIds.size === 1, 'payout: a score tie is broken by fewer wrong answers');
+    assertOnce(r.winnerIds.size === 2, 'payout: both scorers win when exactly two players scored');
+    assertOnce(
+      (r.payoutByUserId.get('b') ?? 0) > (r.payoutByUserId.get('a') ?? 0),
+      'payout: a score tie for 1st is broken by fewer wrong answers (bigger share)',
+    );
   }
 
   // Tie on score AND wrong count, broken by earliest last-answer timestamp.
@@ -165,19 +177,22 @@ function testPayoutMath(): void {
       { userId: 'a', score: 4, wrong: 2, lastAnswerAt: 900 },
       { userId: 'b', score: 4, wrong: 2, lastAnswerAt: 100 },
     ]);
-    assertOnce(r.winnerIds.has('b') && r.winnerIds.size === 1, 'payout: a full tie is broken by the earliest final answer');
+    assertOnce(
+      (r.payoutByUserId.get('b') ?? 0) > (r.payoutByUserId.get('a') ?? 0),
+      'payout: a full tie for 1st is broken by the earliest final answer (bigger share)',
+    );
   }
 
-  // Fully tied winners split the winner pool evenly.
+  // Only one player actually scored — they take the entire winner pool alone; a
+  // 0-score player is never paid just for technically ranking "2nd".
   {
     const r = computeMatchPayout(300, [
       { userId: 'a', score: 4, wrong: 1, lastAnswerAt: 100 },
-      { userId: 'b', score: 4, wrong: 1, lastAnswerAt: 100 },
-      { userId: 'c', score: 1, wrong: 4, lastAnswerAt: 100 },
+      { userId: 'b', score: 0, wrong: 5, lastAnswerAt: 100 },
+      { userId: 'c', score: 0, wrong: 5, lastAnswerAt: 100 },
     ]);
-    assertOnce(r.winnerIds.size === 2 && r.winnerIds.has('a') && r.winnerIds.has('b'), 'payout: an exact tie produces two winners');
-    assertOnce(r.platformCut === 60 && r.winnerPayoutTotal === 240, 'payout: pool split is still exactly 80/20 with multiple winners');
-    assertOnce(r.perWinnerPayout === 120, 'payout: tied winners split the winner pool evenly (240 / 2 = 120)');
+    assertOnce(r.winnerIds.size === 1 && r.winnerIds.has('a'), 'payout: a sole scorer is the only winner');
+    assertOnce(r.payoutByUserId.get('a') === r.winnerPayoutTotal, 'payout: a sole scorer takes the entire winner pool alone');
   }
 
   // Void match: nobody scored anything.
@@ -269,10 +284,11 @@ async function main() {
     socket.disconnect();
   }
 
-  // --- Full 3-player wagered match: pooling, live scoring, 80/20 payout -----
+  // --- Full 4-player wagered match: pooling, live scoring, top-2/bottom-2 payout -----
   {
     const entryFee = 100;
-    const sockets = { alice: connect(), bob: connect(), carol: connect() };
+    const dana = await createGuest(`SelfTestDana_${suffix}`);
+    const sockets = { alice: connect(), bob: connect(), carol: connect(), dana: connect() };
     await Promise.all(Object.values(sockets).map((s) => new Promise<void>((r) => s.on('connect', () => r()))));
 
     const createAck = await emitAck<{ ok: boolean; roomId: string }>(sockets.alice, 'rooms:create', {
@@ -285,8 +301,9 @@ async function main() {
       emitAck<{ ok: boolean }>(sockets.alice, 'rooms:join', { userId: alice.id, roomId }),
       emitAck<{ ok: boolean }>(sockets.bob, 'rooms:join', { userId: bob.id, roomId }),
       emitAck<{ ok: boolean }>(sockets.carol, 'rooms:join', { userId: carol.id, roomId }),
+      emitAck<{ ok: boolean }>(sockets.dana, 'rooms:join', { userId: dana.id, roomId }),
     ]);
-    assert(joinResults.every((r) => r.ok), 'all three players join the wagered room');
+    assert(joinResults.every((r) => r.ok), 'all four players join the wagered room (rooms are fixed 4-player matches)');
 
     const liveStates: RoomStatePublic[] = [];
     sockets.alice.on('room:update', (state: RoomStatePublic) => liveStates.push(state));
@@ -295,13 +312,15 @@ async function main() {
       playUntilMatchEnds(sockets.alice, alice.id, roomId, 'cycle'),
       playUntilMatchEnds(sockets.bob, bob.id, roomId, 'cycle'),
       playUntilMatchEnds(sockets.carol, carol.id, roomId, 'always-wrong'), // guaranteed loser, exercises the chance-depletion path
+      playUntilMatchEnds(sockets.dana, dana.id, roomId, 'always-wrong'), // guaranteed loser
     ];
 
-    // Mark everyone ready to trigger the countdown -> live transition.
+    // Mark everyone ready to trigger the countdown -> live transition (only once all 4 are ready).
     await Promise.all([
       emitAck(sockets.alice, 'rooms:ready', { userId: alice.id, roomId }),
       emitAck(sockets.bob, 'rooms:ready', { userId: bob.id, roomId }),
       emitAck(sockets.carol, 'rooms:ready', { userId: carol.id, roomId }),
+      emitAck(sockets.dana, 'rooms:ready', { userId: dana.id, roomId }),
     ]);
 
     const matchResults = await Promise.all(matchEndPromises);
@@ -309,22 +328,29 @@ async function main() {
     if (!resultAlice) throw new Error('match:end payload missing for alice');
 
     assert(liveStates.some((s) => s.status === 'live'), 'room transitions through waiting -> countdown -> live');
-    assert(resultAlice.pool === entryFee * 3, `pool equals sum of entry fees (${entryFee * 3})`);
+    assert(resultAlice.pool === entryFee * 4, `pool equals sum of entry fees (${entryFee * 4})`);
     assert(
       resultAlice.platformCut + resultAlice.winnerPayoutTotal === resultAlice.pool,
       'platform cut + winner payout reconstructs the pool exactly (no rounding leak)',
     );
-    // The exact 80/20 split math itself is covered exhaustively and deterministically by
+    // The exact split math itself is covered exhaustively and deterministically by
     // testPayoutMath() above; this live end-to-end run additionally verifies the wallet
     // ledger wiring reflects whatever the server actually decided (win split, or the rare
     // void-match refund if literally nobody scored a point in the live window).
     if (!resultAlice.isVoidMatch) {
       const expectedPlatformCut = Math.round(resultAlice.pool * 0.2);
       assert(resultAlice.platformCut === expectedPlatformCut, 'live match: platform keeps exactly 20% of the pool');
+
+      const winners = resultAlice.results.filter((r) => r.isWinner);
+      assert(winners.length <= 2, 'live match: at most 2 players are ever marked winners');
+      const winnerPayoutSum = winners.reduce((sum, r) => sum + r.payout, 0);
+      assert(winnerPayoutSum === resultAlice.winnerPayoutTotal, "live match: winners' payouts sum to exactly the winner pool");
     }
 
     const carolResult = resultAlice.results.find((r) => r.userId === carol.id);
-    assert(!!carolResult && !carolResult.isWinner, 'an always-wrong player is never marked a winner');
+    const danaResult = resultAlice.results.find((r) => r.userId === dana.id);
+    assert(!!carolResult && !carolResult.isWinner && carolResult.payout === 0, 'an always-wrong player is never marked a winner and is paid nothing');
+    assert(!!danaResult && !danaResult.isWinner && danaResult.payout === 0, 'a second always-wrong player is also never a winner and is paid nothing');
 
     for (const r of resultAlice.results) {
       const wallet = await getWallet(r.userId);
@@ -343,7 +369,9 @@ async function main() {
     const entryFee = 10;
     const dave = await createGuest(`SelfTestDave_${suffix}`);
     const erin = await createGuest(`SelfTestErin_${suffix}`);
-    const sockets = { dave: connect(), erin: connect() };
+    const frank = await createGuest(`SelfTestFrank_${suffix}`);
+    const grace = await createGuest(`SelfTestGrace_${suffix}`);
+    const sockets = { dave: connect(), erin: connect(), frank: connect(), grace: connect() };
     await Promise.all(Object.values(sockets).map((s) => new Promise<void>((r) => s.on('connect', () => r()))));
 
     const createAck = await emitAck<{ ok: boolean; roomId: string }>(sockets.dave, 'rooms:create', {
@@ -354,15 +382,21 @@ async function main() {
     await Promise.all([
       emitAck(sockets.dave, 'rooms:join', { userId: dave.id, roomId }),
       emitAck(sockets.erin, 'rooms:join', { userId: erin.id, roomId }),
+      emitAck(sockets.frank, 'rooms:join', { userId: frank.id, roomId }),
+      emitAck(sockets.grace, 'rooms:join', { userId: grace.id, roomId }),
     ]);
 
     const matchEndPromises = [
       playUntilMatchEnds(sockets.dave, dave.id, roomId, 'always-wrong'),
       playUntilMatchEnds(sockets.erin, erin.id, roomId, 'always-wrong'),
+      playUntilMatchEnds(sockets.frank, frank.id, roomId, 'always-wrong'),
+      playUntilMatchEnds(sockets.grace, grace.id, roomId, 'always-wrong'),
     ];
     await Promise.all([
       emitAck(sockets.dave, 'rooms:ready', { userId: dave.id, roomId }),
       emitAck(sockets.erin, 'rooms:ready', { userId: erin.id, roomId }),
+      emitAck(sockets.frank, 'rooms:ready', { userId: frank.id, roomId }),
+      emitAck(sockets.grace, 'rooms:ready', { userId: grace.id, roomId }),
     ]);
     const [voidResult] = await Promise.all(matchEndPromises);
     if (!voidResult) throw new Error('match:end payload missing for the void-match test');

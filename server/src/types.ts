@@ -23,10 +23,17 @@ export function getReadyCountdownMs(): number {
   return Number(process.env.ARCADE_READY_COUNTDOWN_MS) || 5_000;
 }
 export const STARTING_CHANCES = 5;
-export const MIN_PLAYERS_TO_START = 2;
-export const MAX_PLAYERS_PER_ROOM = 8;
-export const PLATFORM_FEE_RATE = 0.2; // 20% platform cut, 80% to the winner(s)
+// Rooms are fixed 4-player matches that only start once completely full — the top 2
+// scorers win, the bottom 2 win nothing (see FIRST_PLACE_SHARE below for the split).
+export const MIN_PLAYERS_TO_START = 4;
+export const MAX_PLAYERS_PER_ROOM = 4;
+export const PLATFORM_FEE_RATE = 0.2; // 20% platform cut, 80% to the winners
+// Of the winner pool (winnerPayoutTotal), 1st place takes this share and 2nd place
+// takes the remainder — e.g. 60/40. If only one player actually scores, they take
+// the entire winner pool alone instead of splitting with a non-scoring "2nd place".
+export const FIRST_PLACE_SHARE = 0.6;
 export const STARTING_WALLET_BALANCE = 1000;
+
 
 export interface User {
   id: string;

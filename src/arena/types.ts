@@ -26,14 +26,26 @@ export const ENTRY_FEE_TIERS = [10, 50, 100, 500, 1000, 5000, 10000] as const;
 
 /** Mirrors server/src/types.ts — used purely for client-side display math
  *  (e.g. showing a room's potential win amount before joining). The server
- *  is always the source of truth for the real payout at match end. */
-export const PLATFORM_FEE_RATE = 0.2; // 20% platform cut, 80% to the winner(s)
-export const MAX_PLAYERS_PER_ROOM = 8;
-export const MIN_PLAYERS_TO_START = 2;
+ *  is always the source of truth for the real payout at match end.
+ *
+ *  Every room is a fixed 4-player match that only starts once completely
+ *  full: the top 2 scorers win and split the pool (60/40, best to worst),
+ *  the bottom 2 win nothing. */
+export const PLATFORM_FEE_RATE = 0.2; // 20% platform cut, 80% to the winners
+export const MAX_PLAYERS_PER_ROOM = 4;
+export const MIN_PLAYERS_TO_START = 4;
+export const FIRST_PLACE_SHARE = 0.6; // 1st place's cut of the winner pool; 2nd gets the remainder
 
-/** Winner's take of a pool of this size, rounded the same way the server rounds it. */
+/** Combined winner pool for a pool of this size (80% of it), rounded the same way the server rounds it. */
 export function winnerShareOf(pool: number): number {
   return Math.round(pool * (1 - PLATFORM_FEE_RATE));
+}
+
+/** 1st/2nd place split of a winner pool, rounded the same way the server rounds it
+ *  (1st gets FIRST_PLACE_SHARE, 2nd gets the exact remainder — nothing left unclaimed). */
+export function splitWinnerPayout(winnerPayoutTotal: number): { first: number; second: number } {
+  const first = Math.round(winnerPayoutTotal * FIRST_PLACE_SHARE);
+  return { first, second: winnerPayoutTotal - first };
 }
 
 export interface ArenaUser {
