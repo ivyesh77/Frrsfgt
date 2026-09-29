@@ -4,6 +4,7 @@ import { Home } from './Home';
 import { Lobby } from './Lobby';
 import { RoomScreen } from './RoomScreen';
 import { MatchResult } from './MatchResult';
+import { ProfileScreen } from './ProfileScreen';
 import './arena.css';
 
 /** Top-level orchestrator for the multiplayer wagering arcade — one screen per stage. */
@@ -38,6 +39,17 @@ export function ArenaApp() {
           rooms={state.rooms}
           busy={state.busy}
           onPlay={arena.playAtFee}
+          onTopUp={arena.topUp}
+          onWithdraw={arena.withdraw}
+          onProfile={arena.goToProfile}
+        />
+      )}
+
+      {state.stage === 'profile' && state.user && (
+        <ProfileScreen
+          user={state.user}
+          onBack={arena.backToLobby}
+          onLogout={arena.logout}
           onTopUp={arena.topUp}
           onWithdraw={arena.withdraw}
         />

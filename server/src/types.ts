@@ -68,7 +68,7 @@ export interface User {
   createdAt: number;
 }
 
-export type TransactionType = 'topup' | 'withdrawal' | 'entry_fee' | 'refund' | 'payout' | 'platform_fee';
+export type TransactionType = 'topup' | 'withdrawal' | 'entry_fee' | 'refund' | 'payout' | 'platform_fee' | 'signup_bonus';
 
 export interface Transaction {
   id: string;
@@ -78,6 +78,21 @@ export interface Transaction {
   roomId?: string;
   balanceAfter: number;
   timestamp: number;
+}
+
+/** Lifetime profile stats derived from a user's full transaction ledger (never capped to
+ *  the last N entries the wallet ledger UI shows) — powers the Profile screen. */
+export interface WalletStats {
+  memberSince: number;
+  matchesPlayed: number;
+  wins: number;
+  totalWagered: number;
+  totalWon: number;
+  totalRefunded: number;
+  totalDeposited: number;
+  totalWithdrawn: number;
+  /** Net gaming profit/loss: totalWon + totalRefunded - totalWagered (deposits/withdrawals excluded — they just move money in/out, they aren't gaming outcomes). */
+  netGameProfit: number;
 }
 
 /** A single generated question. `correctIndex` never leaves the server. */

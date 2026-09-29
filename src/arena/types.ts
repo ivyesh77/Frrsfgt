@@ -150,7 +150,7 @@ export interface MemoryMatchPayload {
 }
 
 // --- Wallet ledger --------------------------------------------------------
-export type TransactionType = 'topup' | 'withdrawal' | 'entry_fee' | 'refund' | 'payout' | 'platform_fee';
+export type TransactionType = 'topup' | 'withdrawal' | 'entry_fee' | 'refund' | 'payout' | 'platform_fee' | 'signup_bonus';
 
 export interface Transaction {
   id: string;
@@ -162,6 +162,36 @@ export interface Transaction {
   timestamp: number;
 }
 
+/** Lifetime profile stats derived from a user's full transaction ledger — powers the
+ *  Profile screen. Mirrors server/src/types.ts. */
+export interface WalletStats {
+  memberSince: number;
+  matchesPlayed: number;
+  wins: number;
+  totalWagered: number;
+  totalWon: number;
+  totalRefunded: number;
+  totalDeposited: number;
+  totalWithdrawn: number;
+  netGameProfit: number;
+}
+
+/** A stable, wallet-address-style id for flavor — purely cosmetic, derived from the guest
+ *  account id (never a real crypto address; this product never touches real currency). */
+export function coinWalletId(userId: string): string {
+  return `ARC-${userId.slice(0, 10).toUpperCase()}`;
+}
+
+/** 1-2 letter avatar initials derived from a display name (e.g. "Alex Rivera" -> "AR"). */
+export function initialsOf(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  const first = parts[0];
+  if (!first) return '?';
+  const last = parts[parts.length - 1];
+  if (!last || last === first) return first.slice(0, 2).toUpperCase();
+  return (first.charAt(0) + last.charAt(0)).toUpperCase();
+}
+
 export const TRANSACTION_LABELS: Record<TransactionType, string> = {
   topup: 'Deposit',
   withdrawal: 'Withdrawal',
@@ -169,4 +199,5 @@ export const TRANSACTION_LABELS: Record<TransactionType, string> = {
   refund: 'Refund',
   payout: 'Match payout',
   platform_fee: 'Platform fee',
+  signup_bonus: 'Welcome bonus',
 };

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Button } from '../../components/common/Button';
 import { fetchWalletDetail } from '../api';
-import { TRANSACTION_LABELS, type ArenaUser, type Transaction } from '../types';
+import { TRANSACTION_LABELS, coinWalletId, type ArenaUser, type Transaction } from '../types';
 
 interface WalletModalProps {
   open: boolean;
@@ -28,13 +28,7 @@ function formatTime(ts: number): string {
 
 /** True when this ledger entry adds money to the wallet (shown in green with a + sign). */
 function isCredit(type: Transaction['type']): boolean {
-  return type === 'topup' || type === 'refund' || type === 'payout';
-}
-
-/** A stable, wallet-address-style id for flavor — purely cosmetic, derived from the guest
- *  account id (never a real crypto address; this product never touches real currency). */
-function coinWalletId(userId: string): string {
-  return `ARC-${userId.slice(0, 10).toUpperCase()}`;
+  return type === 'topup' || type === 'refund' || type === 'payout' || type === 'signup_bonus';
 }
 
 /** Full wallet view: live balance, ArenaCoin deposit/withdraw, and the real transaction

@@ -9,6 +9,7 @@ import {
   winnerShareOf,
   splitWinnerPayout,
   type ArenaUser,
+  initialsOf,
   type RoomFormat,
   type RoomFormatMeta,
   type RoomSummary,
@@ -22,6 +23,7 @@ interface LobbyProps {
   onPlay: (entryFee: number, format: RoomFormat) => void;
   onTopUp: (amount: number) => Promise<void> | void;
   onWithdraw: (amount: number) => Promise<void> | void;
+  onProfile: () => void;
 }
 
 type FormatFilter = 'all' | RoomFormat;
@@ -29,7 +31,7 @@ type FormatFilter = 'all' | RoomFormat;
 /** Casino-style lobby: pick a stake, hit Play — you're auto-seated at an open table for
  *  that stake, or a fresh one opens for you. No separate "create room" step, and every
  *  stake is always visible as its own table card (never an empty list). */
-export function Lobby({ user, rooms, busy, onPlay, onTopUp, onWithdraw }: LobbyProps) {
+export function Lobby({ user, rooms, busy, onPlay, onTopUp, onWithdraw, onProfile }: LobbyProps) {
   const [walletOpen, setWalletOpen] = useState(false);
   const [filter, setFilter] = useState<FormatFilter>('all');
 
@@ -42,11 +44,19 @@ export function Lobby({ user, rooms, busy, onPlay, onTopUp, onWithdraw }: LobbyP
           <h1 className="arena-title arena-title--sm">Wager Arena</h1>
           <p className="arena-subtitle arena-subtitle--sm">Hi {user.name}, pick a table and play.</p>
         </div>
-        <button type="button" className="arena-wallet glass-panel arena-wallet--button" onClick={() => setWalletOpen(true)}>
-          <span className="arena-wallet__label">Wallet</span>
-          <span className="arena-wallet__value">🪙 {user.walletBalance.toLocaleString()}</span>
-          <span className="arena-wallet__cta">Deposit · Withdraw · History →</span>
-        </button>
+        <div className="arena-lobby__header-actions">
+          <button type="button" className="arena-profile-button" onClick={onProfile} aria-label="Open profile">
+            <span className="arena-profile-button__avatar" aria-hidden="true">
+              {initialsOf(user.name)}
+            </span>
+            Profile
+          </button>
+          <button type="button" className="arena-wallet glass-panel arena-wallet--button" onClick={() => setWalletOpen(true)}>
+            <span className="arena-wallet__label">Wallet</span>
+            <span className="arena-wallet__value">🪙 {user.walletBalance.toLocaleString()}</span>
+            <span className="arena-wallet__cta">Deposit · Withdraw · History →</span>
+          </button>
+        </div>
       </header>
 
       <section className="arena-game-feature glass-panel">

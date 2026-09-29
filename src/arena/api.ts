@@ -1,4 +1,4 @@
-import type { ArenaUser, Transaction } from './types';
+import type { ArenaUser, Transaction, WalletStats } from './types';
 
 async function parseOrThrow<T>(res: Response): Promise<T> {
   const body = (await res.json().catch(() => ({}))) as T & { error?: string };
@@ -38,6 +38,13 @@ export async function topUpWallet(userId: string, amount: number): Promise<Arena
   });
   const body = await parseOrThrow<{ user: ArenaUser }>(res);
   return body.user;
+}
+
+/** Lifetime profile stats (matches played, total wagered, net profit, etc.) for the Profile screen. */
+export async function fetchWalletStats(userId: string): Promise<WalletStats> {
+  const res = await fetch(`/api/wallet/${userId}/stats`);
+  const body = await parseOrThrow<{ stats: WalletStats }>(res);
+  return body.stats;
 }
 
 export async function withdrawWallet(userId: string, amount: number): Promise<ArenaUser> {

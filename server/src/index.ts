@@ -6,7 +6,7 @@ import { GAME_KIND_LABELS } from './gameKinds/index.js';
 import { RoomManager, InsufficientFundsError } from './rooms.js';
 import { findUserByName, getUser } from './store.js';
 import { ENTRY_FEE_TIERS, GAME_KINDS, ROOM_FORMATS, type GameKind, type RoomFormat } from './types.js';
-import { createGuestUser, recentTransactions, topUp, withdraw } from './wallet.js';
+import { createGuestUser, getWalletStats, recentTransactions, topUp, withdraw } from './wallet.js';
 
 const PORT = Number(process.env.PORT) || 8787;
 
@@ -60,6 +60,12 @@ app.get('/api/wallet/:userId', (req, res) => {
   const user = getUser(req.params.userId);
   if (!user) return res.status(404).json({ error: 'User not found' });
   res.json({ user, transactions: recentTransactions(user.id) });
+});
+
+app.get('/api/wallet/:userId/stats', (req, res) => {
+  const user = getUser(req.params.userId);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  res.json({ stats: getWalletStats(user.id) });
 });
 
 app.post('/api/wallet/:userId/topup', (req, res) => {

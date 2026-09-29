@@ -73,6 +73,13 @@ export function getTransactionsForUser(userId: string, limit = 25): Transaction[
     .reverse();
 }
 
+/** Every transaction ever recorded for this user, unbounded — used for lifetime profile
+ *  stats (matches played, total wagered, etc.) where `getTransactionsForUser`'s 25-entry
+ *  cap for the ledger UI would quietly under-count an active player's history. */
+export function getAllTransactionsForUser(userId: string): Transaction[] {
+  return db.transactions.filter((t) => t.userId === userId);
+}
+
 /** Test-only escape hatch so the self-test suite starts from a clean slate. */
 export function __resetStoreForTests(): void {
   db = { users: {}, transactions: [] };

@@ -1,6 +1,6 @@
 import { nanoid } from 'nanoid';
-import { getTransactionsForUser, getUser, recordTransaction, upsertUser } from './store.js';
-import { STARTING_WALLET_BALANCE, type Transaction, type TransactionType, type User } from './types.js';
+import { getAllTransactionsForUser, getTransactionsForUser, getUser, recordTransaction, upsertUser } from './store.js';
+import { STARTING_WALLET_BALANCE, type Transaction, type TransactionType, type User, type WalletStats } from './types.js';
 
 export class InsufficientFundsError extends Error {
   constructor() {
@@ -19,7 +19,9 @@ export function createGuestUser(name: string): User {
   recordTransaction({
     id: nanoid(12),
     userId: user.id,
-    type: 'topup',
+    // Distinct from a player-initiated 'topup' so profile stats (and the wallet ledger UI)
+    // don't count the automatic starting grant as a deposit the player actually made.
+    type: 'signup_bonus',
     amount: STARTING_WALLET_BALANCE,
     balanceAfter: user.walletBalance,
     timestamp: Date.now(),
@@ -82,4 +84,55 @@ export function creditPayout(userId: string, amount: number, roomId: string): Us
 
 export function recentTransactions(userId: string): Transaction[] {
   return getTransactionsForUser(userId);
+}
+
+/** Lifetime profile stats computed from the user's entire ledger (see
+ *  getAllTransactionsForUser — never capped like the wallet-history UI feed). */
+export function getWalletStats(userId: string): WalletStats {
+  const user = getUser(userId);
+  if (!user) throw new Error('Unknown user');
+
+  const roomsWagered = new Set<string>();
+  let wins = 0;
+  let totalWagered = 0;
+  let totalWon = 0;
+  let totalRefunded = 0;
+  let totalDeposited = 0;
+  let totalWithdrawn = 0;
+
+  for (const tx of getAllTransactionsForUser(userId)) {
+    switch (tx.type) {
+      case 'entry_fee':
+        if (tx.roomId) roomsWagered.add(tx.roomId);
+        totalWagered += Math.abs(tx.amount);
+        break;
+      case 'payout':
+        wins += 1;
+        totalWon += tx.amount;
+        break;
+      case 'refund':
+        totalRefunded += tx.amount;
+        break;
+      case 'topup':
+        totalDeposited += tx.amount;
+        break;
+      case 'withdrawal':
+        totalWithdrawn += Math.abs(tx.amount);
+        break;
+      default:
+        break;
+    }
+  }
+
+  return {
+    memberSince: user.createdAt,
+    matchesPlayed: roomsWagered.size,
+    wins,
+    totalWagered,
+    totalWon,
+    totalRefunded,
+    totalDeposited,
+    totalWithdrawn,
+    netGameProfit: totalWon + totalRefunded - totalWagered,
+  };
 }

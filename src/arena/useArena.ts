@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react';
 import { fetchWallet, guestLogin, topUpWallet, withdrawWallet, type AuthMode } from './api';
 import { getArenaSocket } from './socket';
-import { loadStoredIdentity, saveStoredIdentity } from './storage';
+import { clearStoredIdentity, loadStoredIdentity, saveStoredIdentity } from './storage';
 import type { ArcadeQuestionPublic, ArenaUser, MatchResultPublic, RoomFormat, RoomStatePublic, RoomSummary } from './types';
 
-export type ArenaStage = 'login' | 'lobby' | 'room' | 'result';
+export type ArenaStage = 'login' | 'lobby' | 'room' | 'result' | 'profile';
 
 export interface AnswerFeedback {
   questionId: string;
@@ -41,6 +41,8 @@ type Action =
   | { type: 'ANSWER_RESULT'; feedback: AnswerFeedback }
   | { type: 'MATCH_END'; result: MatchResultPublic }
   | { type: 'RESET_TO_LOBBY' }
+  | { type: 'VIEW_PROFILE' }
+  | { type: 'LOGOUT' }
   | { type: 'ERROR'; error: string | null };
 
 const initialState: ArenaState = {
@@ -111,6 +113,10 @@ function reducer(state: ArenaState, action: Action): ArenaState {
       return { ...state, stage: 'result', matchResult: action.result, question: null };
     case 'RESET_TO_LOBBY':
       return { ...state, stage: 'lobby', room: null, matchResult: null, question: null, answerFeedback: null };
+    case 'VIEW_PROFILE':
+      return { ...state, stage: 'profile', error: null };
+    case 'LOGOUT':
+      return { ...initialState };
     case 'ERROR':
       return { ...state, error: action.error, busy: false };
     default:
@@ -302,6 +308,17 @@ export function useArena() {
     dispatch({ type: 'RESET_TO_LOBBY' });
   }, []);
 
+  const goToProfile = useCallback(() => {
+    dispatch({ type: 'VIEW_PROFILE' });
+  }, []);
+
+  /** Signs the player out of this browser — clears the stored guest identity so the next
+   *  visit lands on the login screen instead of silently auto-logging back in. */
+  const logout = useCallback(() => {
+    clearStoredIdentity();
+    dispatch({ type: 'LOGOUT' });
+  }, []);
+
   const clearError = useCallback(() => dispatch({ type: 'ERROR', error: null }), []);
 
   return {
@@ -315,6 +332,8 @@ export function useArena() {
     setReady,
     submitAnswer,
     backToLobby,
+    goToProfile,
+    logout,
     clearError,
   };
 }

@@ -29,3 +29,13 @@ export function saveStoredIdentity(identity: StoredIdentity): void {
     // Storage unavailable — the player just has to re-enter their name next visit.
   }
 }
+
+/** Logs the player out of this browser — the next visit lands back on the login screen
+ *  instead of silently auto-logging back into the same guest account. */
+export function clearStoredIdentity(): void {
+  try {
+    window.localStorage.removeItem(IDENTITY_KEY);
+  } catch {
+    // Storage unavailable — nothing to clear.
+  }
+}

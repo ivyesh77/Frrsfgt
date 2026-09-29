@@ -18,7 +18,7 @@ process.env.ARCADE_READY_COUNTDOWN_MS = '400';
 import { io as ioClient, type Socket } from 'socket.io-client';
 import { generateQuestion } from './gameKinds/index.js';
 import { computeMatchPayout } from './payout.js';
-import { GAME_KINDS, type ArcadeQuestionPublic, type MatchResultPublic, type RoomStatePublic, type User } from './types.js';
+import { GAME_KINDS, type ArcadeQuestionPublic, type MatchResultPublic, type RoomStatePublic, type User, type WalletStats } from './types.js';
 
 const BASE_URL = `http://localhost:${process.env.PORT}`;
 
@@ -500,6 +500,19 @@ async function main() {
       assert(!!loser && loser.payout === 0, 'the duel loser is paid nothing');
     }
 
+    // --- Profile stats: lifetime aggregation reflects this match regardless of outcome ---
+    const heidiStats = (await (await fetch(`${BASE_URL}/api/wallet/${heidi.id}/stats`)).json()) as { stats: WalletStats };
+    assert(heidiStats.stats.matchesPlayed === 1, 'profile stats: playing one match counts as 1 distinct match played');
+    assert(heidiStats.stats.totalWagered === entryFee, `profile stats: total wagered equals the entry fee paid (${entryFee})`);
+    assert(heidiStats.stats.memberSince === heidi.createdAt, "profile stats: memberSince matches the user's account creation time");
+    if (resultHeidi.isVoidMatch) {
+      assert(heidiStats.stats.totalRefunded === entryFee, 'profile stats: a void match refunds the entry fee in full');
+      assert(heidiStats.stats.netGameProfit === 0, 'profile stats: a fully-refunded void match nets to zero profit/loss');
+    } else {
+      const heidiWon = resultHeidi.results.find((r) => r.userId === heidi.id)?.isWinner ?? false;
+      assert(heidiStats.stats.wins === (heidiWon ? 1 : 0), 'profile stats: wins reflects whether this player actually won the duel');
+    }
+
     Object.values(sockets).forEach((s) => s.disconnect());
   }
 
@@ -543,6 +556,15 @@ async function main() {
     const txs = await (await fetch(`${BASE_URL}/api/wallet/${judy.id}`)).json() as { transactions: { type: string }[] };
     assert(txs.transactions.some((t) => t.type === 'topup'), 'the ledger records the deposit as a topup transaction');
     assert(txs.transactions.some((t) => t.type === 'withdrawal'), 'the ledger records the withdrawal as a withdrawal transaction');
+
+    const judyStats = (await (await fetch(`${BASE_URL}/api/wallet/${judy.id}/stats`)).json()) as { stats: WalletStats };
+    assert(judyStats.stats.totalDeposited === 500, 'profile stats: total deposited reflects the one 500 deposit made (the 1000 signup bonus is not counted as a deposit)');
+    assert(judyStats.stats.totalWithdrawn === 700, 'profile stats: total withdrawn reflects the one 700 withdrawal (the rejected overdraft/invalid attempts never touched the ledger)');
+    assert(judyStats.stats.matchesPlayed === 0, "profile stats: a player who never joined a room has 0 matches played");
+    assert(judyStats.stats.netGameProfit === 0, 'profile stats: deposits/withdrawals alone never affect gaming net profit/loss');
+
+    const missingStatsRes = await fetch(`${BASE_URL}/api/wallet/nonexistent-user-id/stats`);
+    assert(missingStatsRes.status === 404, 'requesting stats for an unknown user returns 404');
   }
 
   console.log('\n' + (failures === 0 ? 'ALL SELF-TESTS PASSED' : `${failures} SELF-TEST(S) FAILED`));
