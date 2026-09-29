@@ -49,7 +49,6 @@ export function ArenaApp() {
           room={state.room}
           question={state.question}
           questionReceivedAt={state.questionReceivedAt}
-          reactionReveal={state.reactionReveal}
           answerFeedback={state.answerFeedback}
           onReady={arena.setReady}
           onLeave={arena.leaveRoom}

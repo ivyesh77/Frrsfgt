@@ -13,11 +13,7 @@ export const ASSET_MIRROR: AssetRef[] = [
   { id: 'cat', category: 'animals' },
   { id: 'dog', category: 'animals' },
   { id: 'fox', category: 'animals' },
-  { id: 'rabbit', category: 'animals' },
-  { id: 'owl', category: 'animals' },
   { id: 'pizza', category: 'food' },
   { id: 'burger', category: 'food' },
-  { id: 'donut', category: 'food' },
-  { id: 'cupcake', category: 'food' },
   { id: 'apple', category: 'fruits' },
 ];

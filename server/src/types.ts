@@ -1,29 +1,12 @@
-/** Core domain types shared across the wallet, room manager, and game kinds. */
+/** Core domain types shared across the wallet, room manager, and game kinds.
+ *  This product ships a single game (Memory Match) — GameKind is kept as a
+ *  named type (rather than inlining the literal everywhere) so a second game
+ *  could be added later without reshaping every call site, but today it only
+ *  ever has one value. */
 
-export type GameKind =
-  | 'memoryMatch'
-  | 'quickMath'
-  | 'colorMatch'
-  | 'emojiMatch'
-  | 'oddOneOut'
-  | 'numberSequence'
-  | 'wordScramble'
-  | 'shapeMatch'
-  | 'patternRecall'
-  | 'reactionTap';
+export type GameKind = 'memoryMatch';
 
-export const GAME_KINDS: GameKind[] = [
-  'memoryMatch',
-  'quickMath',
-  'colorMatch',
-  'emojiMatch',
-  'oddOneOut',
-  'numberSequence',
-  'wordScramble',
-  'shapeMatch',
-  'patternRecall',
-  'reactionTap',
-];
+export const GAME_KINDS: GameKind[] = ['memoryMatch'];
 
 /** Fixed room stake tiers, in virtual currency units (mirrors ₹10 - ₹10,000). */
 export const ENTRY_FEE_TIERS = [10, 50, 100, 500, 1000, 5000, 10000] as const;

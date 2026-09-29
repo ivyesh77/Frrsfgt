@@ -2,21 +2,9 @@ import { useCallback, useEffect, useReducer, useRef } from 'react';
 import { fetchWallet, guestLogin, topUpWallet, type AuthMode } from './api';
 import { getArenaSocket } from './socket';
 import { loadStoredIdentity, saveStoredIdentity } from './storage';
-import type {
-  ArcadeQuestionPublic,
-  ArenaUser,
-  GameKind,
-  MatchResultPublic,
-  RoomStatePublic,
-  RoomSummary,
-} from './types';
+import type { ArcadeQuestionPublic, ArenaUser, MatchResultPublic, RoomStatePublic, RoomSummary } from './types';
 
 export type ArenaStage = 'login' | 'lobby' | 'room' | 'result';
-
-export interface ReactionReveal {
-  questionId: string;
-  index: number;
-}
 
 export interface AnswerFeedback {
   questionId: string;
@@ -32,7 +20,6 @@ interface ArenaState {
   room: RoomStatePublic | null;
   question: ArcadeQuestionPublic | null;
   questionReceivedAt: number | null;
-  reactionReveal: ReactionReveal | null;
   answerFeedback: AnswerFeedback | null;
   matchResult: MatchResultPublic | null;
   error: string | null;
@@ -51,7 +38,6 @@ type Action =
   | { type: 'ROOM_UPDATE'; room: RoomStatePublic }
   | { type: 'LEAVE_ROOM' }
   | { type: 'QUESTION_RECEIVED'; question: ArcadeQuestionPublic }
-  | { type: 'REACTION_REVEAL'; reveal: ReactionReveal }
   | { type: 'ANSWER_RESULT'; feedback: AnswerFeedback }
   | { type: 'MATCH_END'; result: MatchResultPublic }
   | { type: 'RESET_TO_LOBBY' }
@@ -65,7 +51,6 @@ const initialState: ArenaState = {
   room: null,
   question: null,
   questionReceivedAt: null,
-  reactionReveal: null,
   answerFeedback: null,
   matchResult: null,
   error: null,
@@ -97,8 +82,7 @@ function reducer(state: ArenaState, action: Action): ArenaState {
         error: null,
         question: null,
         questionReceivedAt: null,
-        reactionReveal: null,
-        answerFeedback: null,
+              answerFeedback: null,
         matchResult: null,
       };
     case 'ROOM_UPDATE':
@@ -111,8 +95,7 @@ function reducer(state: ArenaState, action: Action): ArenaState {
         room: null,
         question: null,
         questionReceivedAt: null,
-        reactionReveal: null,
-        answerFeedback: null,
+              answerFeedback: null,
         matchResult: null,
       };
     case 'QUESTION_RECEIVED':
@@ -120,16 +103,12 @@ function reducer(state: ArenaState, action: Action): ArenaState {
         ...state,
         question: action.question,
         questionReceivedAt: Date.now(),
-        reactionReveal: null,
-        answerFeedback: null,
+              answerFeedback: null,
       };
-    case 'REACTION_REVEAL':
-      if (state.question?.id !== action.reveal.questionId) return state;
-      return { ...state, reactionReveal: action.reveal };
     case 'ANSWER_RESULT':
       return { ...state, answerFeedback: action.feedback };
     case 'MATCH_END':
-      return { ...state, stage: 'result', matchResult: action.result, question: null, reactionReveal: null };
+      return { ...state, stage: 'result', matchResult: action.result, question: null };
     case 'RESET_TO_LOBBY':
       return { ...state, stage: 'lobby', room: null, matchResult: null, question: null, answerFeedback: null };
     case 'ERROR':
@@ -161,7 +140,6 @@ export function useArena() {
 
     const onRoomUpdate = (room: RoomStatePublic) => dispatch({ type: 'ROOM_UPDATE', room });
     const onQuestion = (question: ArcadeQuestionPublic) => dispatch({ type: 'QUESTION_RECEIVED', question });
-    const onReveal = (reveal: ReactionReveal) => dispatch({ type: 'REACTION_REVEAL', reveal });
     const onMatchEnd = (result: MatchResultPublic) => {
       dispatch({ type: 'MATCH_END', result });
       // Wallet balance changed (entry fee + possible payout already applied server-side) — pull the fresh number.
@@ -171,13 +149,11 @@ export function useArena() {
 
     socket.on('room:update', onRoomUpdate);
     socket.on('match:question', onQuestion);
-    socket.on('match:reveal', onReveal);
     socket.on('match:end', onMatchEnd);
 
     return () => {
       socket.off('room:update', onRoomUpdate);
       socket.off('match:question', onQuestion);
-      socket.off('match:reveal', onReveal);
       socket.off('match:end', onMatchEnd);
     };
   }, []);
@@ -210,10 +186,9 @@ export function useArena() {
     }
   }, []);
 
-  const refreshRooms = useCallback(async (gameKind?: GameKind) => {
+  const refreshRooms = useCallback(async () => {
     try {
-      const query = gameKind ? `?gameKind=${gameKind}` : '';
-      const res = await fetch(`/api/rooms${query}`);
+      const res = await fetch('/api/rooms');
       const body = (await res.json()) as { rooms: RoomSummary[] };
       dispatch({ type: 'ROOMS_LIST', rooms: body.rooms });
     } catch {
@@ -231,11 +206,11 @@ export function useArena() {
     }
   }, []);
 
-  const createAndJoinRoom = useCallback(async (gameKind: GameKind, entryFee: number) => {
+  const createAndJoinRoom = useCallback(async (entryFee: number) => {
     if (!userRef.current) return;
     dispatch({ type: 'BUSY', busy: true });
     const createAck = await emitAck<{ ok: boolean; roomId?: string; error?: string }>('rooms:create', {
-      gameKind,
+      gameKind: 'memoryMatch',
       entryFee,
     });
     if (!createAck.ok || !createAck.roomId) {

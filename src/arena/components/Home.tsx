@@ -3,7 +3,8 @@ import { motion } from 'framer-motion';
 import { Button } from '../../components/common/Button';
 import { AuthModal } from './AuthModal';
 import type { AuthMode } from '../api';
-import { GAME_KINDS, GAME_KIND_ICONS, GAME_KIND_LABELS, GAME_KIND_TAGLINES } from '../types';
+import { GAME_KIND_TAGLINES } from '../types';
+import gameThumbnail from '../../assets/images/memory-match-thumbnail.webp';
 
 interface HomeProps {
   busy: boolean;
@@ -11,14 +12,14 @@ interface HomeProps {
 }
 
 const HIGHLIGHTS = [
-  { icon: '🎮', label: '10 game modes', detail: 'A fresh challenge every match' },
+  { icon: '🧠', label: 'Memory Match', detail: 'One focused, fast-paced game' },
   { icon: '🏆', label: '80% to the winner', detail: 'Platform keeps a transparent 20% cut' },
   { icon: '🪙', label: '1000 free coins', detail: 'Practice currency, no real money' },
 ];
 
 const STEPS = [
-  { step: '1', title: 'Join a room', detail: 'Pick a game mode and an entry-fee tier, then create or join a room.' },
-  { step: '2', title: 'Race the clock', detail: 'Everyone gets 60 seconds of independently-paced questions.' },
+  { step: '1', title: 'Join a room', detail: 'Pick an entry-fee tier, then create or join a room.' },
+  { step: '2', title: 'Race the clock', detail: 'Everyone gets 60 seconds of independently-paced rounds.' },
   { step: '3', title: 'Winner takes the pool', detail: 'Highest score wins 80% of the pool, paid out instantly.' },
 ];
 
@@ -55,18 +56,23 @@ export function Home({ busy, onLogin }: HomeProps) {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.4 }}
         >
-          <h1 className="home-hero__title">Real-time multiplayer wagering, minus the real money.</h1>
-          <p className="home-hero__subtitle">
-            Stake virtual coins, race a shared 60-second clock across 10 quick-reflex game modes, and take home the
-            pool if you're fastest and sharpest.
-          </p>
-          <div className="home-hero__cta">
-            <Button variant="primary" size="lg" onClick={() => openAuth('signup')}>
-              Get Started Free
-            </Button>
-            <button type="button" className="home-hero__login-link" onClick={() => openAuth('login')}>
-              Already have an account? Log in
-            </button>
+          <div className="home-hero__copy">
+            <h1 className="home-hero__title">Memory Match, played for real stakes.</h1>
+            <p className="home-hero__subtitle">
+              Stake virtual coins, race a shared 60-second clock, and take home the pool if your memory is fastest
+              and sharpest. One game, done right.
+            </p>
+            <div className="home-hero__cta">
+              <Button variant="primary" size="lg" onClick={() => openAuth('signup')}>
+                Get Started Free
+              </Button>
+              <button type="button" className="home-hero__login-link" onClick={() => openAuth('login')}>
+                Already have an account? Log in
+              </button>
+            </div>
+          </div>
+          <div className="home-hero__art-wrap">
+            <img className="home-hero__art" src={gameThumbnail} alt="Memory Match" />
           </div>
         </motion.section>
 
@@ -84,23 +90,9 @@ export function Home({ busy, onLogin }: HomeProps) {
           ))}
         </section>
 
-        <section className="home-section" aria-label="Game modes">
-          <h2 className="home-section__title">10 game modes, one shared clock</h2>
-          <div className="home-modes-grid">
-            {GAME_KINDS.map((kind) => (
-              <div key={kind} className="home-mode-card glass-panel">
-                <span className="home-mode-card__icon" aria-hidden="true">
-                  {GAME_KIND_ICONS[kind]}
-                </span>
-                <div className="home-mode-card__label">{GAME_KIND_LABELS[kind]}</div>
-                <div className="home-mode-card__tagline">{GAME_KIND_TAGLINES[kind]}</div>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <section className="home-section" aria-label="How it works">
-          <h2 className="home-section__title">How it works</h2>
+        <section className="home-section" aria-label="About the game">
+          <h2 className="home-section__title">How Memory Match works</h2>
+          <p className="home-section__lede">{GAME_KIND_TAGLINES.memoryMatch}</p>
           <div className="home-steps">
             {STEPS.map((s) => (
               <div key={s.step} className="home-step glass-panel">

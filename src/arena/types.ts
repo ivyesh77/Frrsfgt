@@ -6,68 +6,20 @@
  * to the server so payloads can be used as-is without any mapping layer.
  */
 
-export type GameKind =
-  | 'memoryMatch'
-  | 'quickMath'
-  | 'colorMatch'
-  | 'emojiMatch'
-  | 'oddOneOut'
-  | 'numberSequence'
-  | 'wordScramble'
-  | 'shapeMatch'
-  | 'patternRecall'
-  | 'reactionTap';
+/** This product ships a single game (Memory Match). GameKind is kept as a
+ *  named type — mirroring the backend — rather than inlining the literal
+ *  everywhere, so a second game could be added later without reshaping
+ *  every call site. */
+export type GameKind = 'memoryMatch';
 
-export const GAME_KINDS: GameKind[] = [
-  'memoryMatch',
-  'quickMath',
-  'colorMatch',
-  'emojiMatch',
-  'oddOneOut',
-  'numberSequence',
-  'wordScramble',
-  'shapeMatch',
-  'patternRecall',
-  'reactionTap',
-];
+export const GAME_KINDS: GameKind[] = ['memoryMatch'];
 
 export const GAME_KIND_LABELS: Record<GameKind, string> = {
   memoryMatch: 'Memory Match',
-  quickMath: 'Quick Math',
-  colorMatch: 'Color Match',
-  emojiMatch: 'Emoji Match',
-  oddOneOut: 'Odd One Out',
-  numberSequence: 'Number Sequence',
-  wordScramble: 'Word Scramble',
-  shapeMatch: 'Shape Match',
-  patternRecall: 'Pattern Recall',
-  reactionTap: 'Reaction Tap',
 };
 
 export const GAME_KIND_TAGLINES: Record<GameKind, string> = {
-  memoryMatch: 'Memorize the icon, then spot its twin.',
-  quickMath: 'Solve the sum before time runs out.',
-  colorMatch: 'Remember the swatch, pick it from four.',
-  emojiMatch: 'Remember the emoji, find it again.',
-  oddOneOut: 'Spot the tile that does not belong.',
-  numberSequence: "Crack the pattern, guess what's next.",
-  wordScramble: 'Unscramble the letters into a word.',
-  shapeMatch: 'Remember the shape, pick it from four.',
-  patternRecall: 'Memorize a short symbol sequence.',
-  reactionTap: 'Wait for the flash, tap it first.',
-};
-
-export const GAME_KIND_ICONS: Record<GameKind, string> = {
-  memoryMatch: '🧠',
-  quickMath: '➗',
-  colorMatch: '🎨',
-  emojiMatch: '😀',
-  oddOneOut: '🔍',
-  numberSequence: '🔢',
-  wordScramble: '🔤',
-  shapeMatch: '🔷',
-  patternRecall: '📿',
-  reactionTap: '⚡',
+  memoryMatch: 'Memorize the icon, then spot its twin among four before time runs out.',
 };
 
 export const ENTRY_FEE_TIERS = [10, 50, 100, 500, 1000, 5000, 10000] as const;
@@ -140,34 +92,7 @@ export interface MatchResultPublic {
   results: MatchResultPlayer[];
 }
 
-// --- Per-game-kind option/prompt payload shapes (for the renderer) --------
+// --- The single game kind's prompt/option payload shape (for the renderer) -
 export interface MemoryMatchPayload {
   assetId: string;
-}
-export interface QuickMathOption {
-  value: number;
-}
-export interface QuickMathPrompt {
-  expression: string;
-}
-export interface ColorPayload {
-  color: string;
-}
-export interface EmojiPayload {
-  emoji: string;
-}
-export interface ShapePayload {
-  shape: string;
-}
-export interface SequencePayload {
-  sequence: string[];
-}
-export interface NumberSequencePrompt {
-  sequence: number[];
-}
-export interface WordScramblePrompt {
-  scrambled: string;
-}
-export interface WordOption {
-  word: string;
 }

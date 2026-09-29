@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import { Button } from '../../components/common/Button';
 import { GAME_KIND_LABELS, type ArcadeQuestionPublic, type ArenaUser, type RoomStatePublic } from '../types';
-import type { AnswerFeedback, ReactionReveal } from '../useArena';
+import type { AnswerFeedback } from '../useArena';
 import { useNow } from '../useNow';
 import { QuestionRenderer, type QuestionPhase } from './QuestionRenderer';
 
@@ -10,7 +10,6 @@ interface RoomScreenProps {
   room: RoomStatePublic;
   question: ArcadeQuestionPublic | null;
   questionReceivedAt: number | null;
-  reactionReveal: ReactionReveal | null;
   answerFeedback: AnswerFeedback | null;
   onReady: () => void;
   onLeave: () => void;
@@ -26,7 +25,6 @@ export function RoomScreen({
   room,
   question,
   questionReceivedAt,
-  reactionReveal,
   answerFeedback,
   onReady,
   onLeave,
@@ -104,7 +102,6 @@ export function RoomScreen({
                 <QuestionRenderer
                   question={question}
                   phase={phase}
-                  reactionReveal={reactionReveal}
                   answerFeedback={answerFeedback}
                   chancesLeft={me.chancesLeft}
                   onAnswer={onAnswer}

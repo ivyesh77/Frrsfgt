@@ -221,14 +221,6 @@ export class RoomManager {
     player.currentQuestionId = question.id;
 
     this.io.to(player.socketId).emit('match:question', question satisfies ArcadeQuestionPublic);
-
-    if (question.kind === 'reactionTap') {
-      const revealTimer = setTimeout(() => {
-        if (player.currentQuestionId !== question.id) return; // already answered/expired
-        this.io.to(player.socketId).emit('match:reveal', { questionId: question.id, index: correctIndex });
-      }, question.memorizeMs);
-      room.timers.push(revealTimer);
-    }
   }
 
   submitAnswer(

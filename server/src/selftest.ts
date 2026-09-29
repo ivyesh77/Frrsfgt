@@ -112,37 +112,8 @@ function testGenerators(): void {
         case 'memoryMatch':
           assertOnce(prompt?.assetId === correctOption.assetId, 'memoryMatch: correctIndex option matches the prompt asset');
           break;
-        case 'colorMatch':
-          assertOnce(prompt?.color === correctOption.color, 'colorMatch: correctIndex option matches the prompt color');
-          break;
-        case 'emojiMatch':
-          assertOnce(prompt?.emoji === correctOption.emoji, 'emojiMatch: correctIndex option matches the prompt emoji');
-          break;
-        case 'shapeMatch':
-          assertOnce(prompt?.shape === correctOption.shape, 'shapeMatch: correctIndex option matches the prompt shape');
-          break;
-        case 'patternRecall': {
-          const promptSeq = ((prompt as { sequence: string[] }).sequence).join('');
-          const optionSeq = (correctOption.sequence as string[]).join('');
-          assertOnce(promptSeq === optionSeq, 'patternRecall: correctIndex option matches the memorized sequence');
-          break;
-        }
-        case 'wordScramble': {
-          const scrambled = [...((prompt as { scrambled: string }).scrambled)].sort().join('');
-          const word = [...(correctOption.word as string)].sort().join('');
-          assertOnce(scrambled === word, 'wordScramble: correctIndex option is an anagram of the scrambled prompt');
-          break;
-        }
-        case 'oddOneOut': {
-          const emojis = options.map((o) => o.emoji);
-          const counts = new Map<string, number>();
-          for (const e of emojis) counts.set(e as string, (counts.get(e as string) ?? 0) + 1);
-          const oddEmoji = [...counts.entries()].find(([, count]) => count === 1)?.[0];
-          assertOnce(emojis[correctIndex] === oddEmoji, 'oddOneOut: correctIndex points at the uniquely-occurring emoji');
-          break;
-        }
         default:
-          break; // quickMath / numberSequence / reactionTap validated structurally above
+          break;
       }
     }
   }
@@ -264,7 +235,7 @@ async function main() {
     const socket = connect();
     await new Promise<void>((r) => socket.on('connect', () => r()));
     const createAck = await emitAck<{ ok: boolean; roomId: string }>(socket, 'rooms:create', {
-      gameKind: 'quickMath',
+      gameKind: 'memoryMatch',
       entryFee: 50,
     });
     assert(createAck.ok, 'room creation succeeds');
@@ -284,7 +255,7 @@ async function main() {
     const socket = connect();
     await new Promise<void>((r) => socket.on('connect', () => r()));
     const createAck = await emitAck<{ ok: boolean; roomId: string }>(socket, 'rooms:create', {
-      gameKind: 'quickMath',
+      gameKind: 'memoryMatch',
       entryFee: 10000,
     });
     const joinAck = await emitAck<{ ok: boolean; error?: string }>(socket, 'rooms:join', {
@@ -305,7 +276,7 @@ async function main() {
     await Promise.all(Object.values(sockets).map((s) => new Promise<void>((r) => s.on('connect', () => r()))));
 
     const createAck = await emitAck<{ ok: boolean; roomId: string }>(sockets.alice, 'rooms:create', {
-      gameKind: 'quickMath',
+      gameKind: 'memoryMatch',
       entryFee,
     });
     const roomId = createAck.roomId;
@@ -376,7 +347,7 @@ async function main() {
     await Promise.all(Object.values(sockets).map((s) => new Promise<void>((r) => s.on('connect', () => r()))));
 
     const createAck = await emitAck<{ ok: boolean; roomId: string }>(sockets.dave, 'rooms:create', {
-      gameKind: 'quickMath',
+      gameKind: 'memoryMatch',
       entryFee,
     });
     const roomId = createAck.roomId;

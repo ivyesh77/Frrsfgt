@@ -1,16 +1,5 @@
 /** Broad content categories used to group Memory Match icon assets. */
-export type AssetCategory =
-  | 'animals'
-  | 'food'
-  | 'fruits'
-  | 'vegetables'
-  | 'objects'
-  | 'vehicles'
-  | 'nature'
-  | 'household'
-  | 'toys'
-  | 'sports'
-  | 'symbols';
+export type AssetCategory = 'animals' | 'food' | 'fruits';
 
 /** Metadata describing a single playable image asset used by the Memory Match game kind. */
 export interface AssetMetadata {
