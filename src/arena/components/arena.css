@@ -606,6 +606,9 @@
   justify-content: space-between;
   gap: 12px;
   padding: 10px 4px 18px;
+  max-width: 1160px;
+  margin: 0 auto;
+  width: 100%;
 }
 
 .home-nav__brand {
@@ -645,6 +648,9 @@
   flex-direction: column;
   gap: 56px;
   padding-bottom: 40px;
+  max-width: 1160px;
+  margin: 0 auto;
+  width: 100%;
 }
 
 .home-hero {
