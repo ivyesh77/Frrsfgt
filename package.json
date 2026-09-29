@@ -8,12 +8,10 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "test": "tsx scripts/engine-selftest.ts",
-    "test:client": "tsx scripts/engine-selftest.ts",
+    "test": "npm run test --prefix server",
     "server:install": "npm install --prefix server",
     "server:dev": "npm run dev --prefix server",
-    "server:test": "npm run test --prefix server",
-    "test:all": "npm run test:client && npm run server:test"
+    "server:test": "npm run test --prefix server"
   },
   "dependencies": {
     "framer-motion": "^13.4.5",
@@ -27,7 +25,6 @@
     "@types/react-dom": "^19.2.7",
     "@vitejs/plugin-react": "^6.1.1",
     "oxlint": "^1.81.0",
-    "tsx": "^4.23.15",
     "typescript": "~6.0.2",
     "vite": "^8.3.0"
   }

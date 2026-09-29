@@ -19,12 +19,11 @@ interface LobbyProps {
   onCreateRoom: (gameKind: GameKind, entryFee: number) => void;
   onJoinRoom: (roomId: string) => void;
   onTopUp: (amount: number) => void;
-  onBack: () => void;
 }
 
 const TOP_UP_OPTIONS = [500, 2000, 10000];
 
-export function Lobby({ user, rooms, onRefresh, onCreateRoom, onJoinRoom, onTopUp, onBack }: LobbyProps) {
+export function Lobby({ user, rooms, onRefresh, onCreateRoom, onJoinRoom, onTopUp }: LobbyProps) {
   const [selectedKind, setSelectedKind] = useState<GameKind>('memoryMatch');
   const [selectedFee, setSelectedFee] = useState<number>(ENTRY_FEE_TIERS[0]);
 
@@ -135,10 +134,6 @@ export function Lobby({ user, rooms, onRefresh, onCreateRoom, onJoinRoom, onTopU
           ))}
         </ul>
       </section>
-
-      <button type="button" className="arena-link arena-link--back" onClick={onBack}>
-        ← Back to Classic mode
-      </button>
     </div>
   );
 }

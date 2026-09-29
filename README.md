@@ -1,14 +1,10 @@
-# Memory Match — Classic + Wager Arena
+# Wager Arena — real-time multiplayer wagering platform
 
-A **React 19 + TypeScript** game with two modes:
-
-1. **Classic** — a polished, 100% client-side single-player memory game (the
-   original build). No backend required.
-2. **Wager Arena** — a real-time **multiplayer** platform: players join
-   stake-based rooms (virtual currency, ₹10–₹10,000-equivalent tiers), race a
-   shared 60-second clock across **10 different quick-reflex game modes**,
-   and the winner takes **80% of the pool** (the platform keeps 20%). Backed
-   by a real Node/Express/Socket.IO server — not a local simulation.
+A **React 19 + TypeScript** frontend backed by a real **Node/Express/Socket.IO**
+server: players join stake-based rooms (virtual currency, ₹10–₹10,000-equivalent
+tiers), race a shared 60-second clock across **10 different quick-reflex game
+modes**, and the winner takes **80% of the pool** (the platform keeps 20%).
+This is the entire app — there is no single-player mode.
 
 > Real money is **not** processed anywhere in this build. The Arena uses a
 > virtual wallet only, seeded with a starting balance and top-up-able for
@@ -26,43 +22,29 @@ npm run server:dev        # terminal 1 — arcade backend on :8787
 npm run dev                # terminal 2 — frontend on :5173 (proxies /api and /socket.io to :8787)
 ```
 
-Open `http://localhost:5173`. The menu offers **PLAY** (Classic) and
-**🪙 Wager Arena** (multiplayer).
+Open `http://localhost:5173`. Enter a guest name to log in, then create or
+join a room from the lobby.
 
 ## Verification
 
 ```bash
-npm run test        # Classic engine regression self-test (scripts/engine-selftest.ts)
-npm run server:test # Arena backend self-test: wallet math, pooling, live match, exact 80/20 payout
-npx tsc -b --noEmit  # frontend type-check
-npx oxlint           # frontend lint
-npm run build        # production build
+npm run test         # Arena backend self-test: wallet math, pooling, live match, exact 80/20 payout
+npx tsc -b --noEmit   # frontend + backend type-check
+npx oxlint            # frontend lint
+npm run build         # production build
 ```
 
 The server self-test spins up the real Express + Socket.IO server in-process
 (short-circuited match/countdown durations via env vars, never in
 production), drives multiple concurrent virtual players through guest login →
 room join → entry-fee debit → live scoring → payout, and asserts the wallet
-and pool math to the rupee. There is no browser available in this sandbox, so
-this Node-level simulation plus manual code review is the verification
-strategy for the multiplayer flow.
+and pool math to the rupee — including deterministic contrived-score cases
+for clear wins, tie-breaking (by wrong-answer count, then by earliest final
+answer), multi-way exact ties, and void matches. There is no browser
+available in this sandbox, so this Node-level simulation plus manual code
+review is the verification strategy for the multiplayer flow.
 
-## Classic mode
-
-- Exactly 20 rounds per game. Each round: a target image appears center-stage
-  → memorize → it hides → four corner options appear (exactly one matches) →
-  you pick → instant feedback → next round.
-- Difficulty ramps smoothly across the 20 rounds (memorize time, answer time,
-  distractor similarity) — never through unfair randomness.
-- Score = base 100 + speed bonus (0-100) + streak bonus (10 × streak) × a
-  small per-tier multiplier. Wrong answers/timeouts score 0 and reset streak.
-- Best score, best streak, games played, and settings persist locally via
-  `localStorage` (corruption-safe fallbacks).
-- 100% client-side. Fully playable offline once loaded. No backend needed.
-
-## Wager Arena mode
-
-### Flow
+## Flow
 
 1. **Guest login** — enter a display name, get a server-issued id + a 1000
    virtual-coin starting wallet (persisted to disk on the server, and
@@ -82,9 +64,10 @@ strategy for the multiplayer flow.
    earliest final answer; a remaining tie splits the payout evenly). Winner
    payout = `round(pool × 0.8)`; the platform keeps the exact remainder
    (`pool - winnerPayout`), so the two numbers always reconstruct the pool
-   exactly with zero rounding leak.
+   exactly with zero rounding leak. If nobody scores at all, the match is
+   voided and every player is refunded their entry fee in full.
 
-### The 10 game kinds
+## The 10 game kinds
 
 All ten share one generic question shape
 (`{ memorizeMs, answerMs, prompt, options[4] }`) so a single client renderer
@@ -106,7 +89,7 @@ emoji, CSS shapes, colors) and need no image assets.
 | Pattern Recall | Memorize a short symbol sequence, pick the matching one. |
 | Reaction Tap | Wait for an unpredictable delay, tap the tile that lights up first. |
 
-### Fairness / anti-cheat model
+## Fairness / anti-cheat model
 
 The server is **authoritative** for every question and every answer — it
 generates all four options and keeps the correct index private, validates
@@ -127,8 +110,6 @@ involved.
 - **Vite 8** dev/build tooling; the dev server proxies `/api` and
   `/socket.io` to the backend so the browser only ever talks to one origin.
 - **Framer Motion** for micro-interactions/transitions.
-- **Web Audio API** — Classic mode's sound effects are synthesized
-  procedurally (oscillators + envelopes); zero external audio dependencies.
 - **socket.io-client** on the frontend for the Arena's live multiplayer sync.
 - Plain modern CSS (custom properties, `clamp()`, CSS Grid) — no CSS
   framework.
@@ -140,18 +121,14 @@ involved.
 
 ```
 src/
-  app entry:        main.tsx, App.tsx           (mode switch: Classic vs Arena)
-  types/            Classic-mode shared types
+  app entry:        main.tsx, App.tsx           (renders BackgroundFX + ArenaApp — the whole app)
+  types/            AssetCategory/AssetMetadata shared with the image registry
   data/
     imageRegistry.ts  10 AI-generated local image assets, registered here
-  utils/            rng, storage, haptics, preload helpers
-  audio/            procedural Web Audio sound engine (Classic mode)
-  game/
-    engine/         Classic mode's pure state machine (constants, difficulty,
-                     validators, round generator, scoring, reducer)
-    hooks/          useGameEngine, useSettings, useStats
-  components/       Classic mode UI (menu, game, result, settings, common)
-  arena/            Wager Arena frontend module
+                       (used by the Memory Match game kind)
+  utils/            preload helper (warms the Memory Match icon cache)
+  components/common/  Button, BackgroundFX — shared UI primitives
+  arena/            Wager Arena frontend module (the entire app)
     types.ts          mirrors the backend's wire types (kept in sync by hand)
     api.ts            REST helpers (guest login, wallet)
     socket.ts         shared Socket.IO client connection
@@ -168,16 +145,17 @@ server/
     wallet.ts           debit/credit/topup/payout, all ledger-recorded
     gameKinds/          one generator per game kind + the registry (index.ts)
     rooms.ts            room lifecycle: create/join/leave/ready/live/payout
+    payout.ts           pool math + winner/tie/void resolution
     index.ts            Express REST + Socket.IO event wiring
     selftest.ts         end-to-end self-test (see Verification above)
 ```
 
 ## Known limitations
 
-- Only 10 of the originally-envisioned larger Classic-mode image pool exist
-  (per-turn image-generation caps in this environment) — Memory Match (both
-  Classic and the Arena kind) is fully playable with these 10, just with a
-  smaller variety than a larger content set would offer.
+- Only 10 image assets exist for the Memory Match game kind (per-turn
+  image-generation caps in this environment) — it is fully playable with
+  these 10, just with a smaller variety than a larger content set would
+  offer.
 - No browser is available in this sandbox, so the Arena UI has been verified
   via `tsc`/`oxlint`/production build plus a Node-driven Socket.IO client
   that exercises the exact same HTTP/WebSocket paths a browser would (through

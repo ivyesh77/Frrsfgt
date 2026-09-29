@@ -6,12 +6,8 @@ import { RoomScreen } from './RoomScreen';
 import { MatchResult } from './MatchResult';
 import './arena.css';
 
-interface ArenaAppProps {
-  onExit: () => void;
-}
-
 /** Top-level orchestrator for the multiplayer wagering arcade — one screen per stage. */
-export function ArenaApp({ onExit }: ArenaAppProps) {
+export function ArenaApp() {
   const arena = useArena();
   const { state } = arena;
 
@@ -34,9 +30,7 @@ export function ArenaApp({ onExit }: ArenaAppProps) {
         </div>
       )}
 
-      {state.stage === 'login' && (
-        <GuestLogin busy={state.authenticating} onLogin={arena.login} onBack={onExit} />
-      )}
+      {state.stage === 'login' && <GuestLogin busy={state.authenticating} onLogin={arena.login} />}
 
       {state.stage === 'lobby' && state.user && (
         <Lobby
@@ -46,7 +40,6 @@ export function ArenaApp({ onExit }: ArenaAppProps) {
           onCreateRoom={arena.createAndJoinRoom}
           onJoinRoom={arena.joinRoom}
           onTopUp={arena.topUp}
-          onBack={onExit}
         />
       )}
 

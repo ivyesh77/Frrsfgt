@@ -5,10 +5,9 @@ import { Button } from '../../components/common/Button';
 interface GuestLoginProps {
   busy: boolean;
   onLogin: (name: string) => void;
-  onBack: () => void;
 }
 
-export function GuestLogin({ busy, onLogin, onBack }: GuestLoginProps) {
+export function GuestLogin({ busy, onLogin }: GuestLoginProps) {
   const [name, setName] = useState('');
 
   function handleSubmit(e: React.FormEvent) {
@@ -55,10 +54,6 @@ export function GuestLogin({ busy, onLogin, onBack }: GuestLoginProps) {
           New players start with <strong>🪙 1000</strong> virtual coins. This is practice-money only — a real
           payment gateway can be plugged in later.
         </p>
-
-        <button type="button" className="arena-link" onClick={onBack}>
-          ← Back to Classic mode
-        </button>
       </motion.div>
     </div>
   );
