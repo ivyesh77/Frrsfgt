@@ -5,13 +5,17 @@ import { GameScreen } from './components/game/GameScreen';
 import { CountdownOverlay } from './components/game/CountdownOverlay';
 import { ResultScreen } from './components/result/ResultScreen';
 import { SettingsModal } from './components/settings/SettingsModal';
+import { ArenaApp } from './arena/components/ArenaApp';
 import { useGameEngine } from './game/hooks/useGameEngine';
 import { useSettings } from './game/hooks/useSettings';
 import { useStats } from './game/hooks/useStats';
 import { IMAGE_REGISTRY, ALL_ASSET_URLS } from './data/imageRegistry';
 import { preloadImages } from './utils/preload';
 
+type AppMode = 'classic' | 'arena';
+
 export default function App() {
+  const [mode, setMode] = useState<AppMode>('classic');
   const { settings, update: updateSettings } = useSettings();
   const { stats, recordGame, reset: resetStats } = useStats();
   const statsRef = useRef(stats);
@@ -66,6 +70,15 @@ export default function App() {
   const isMenu = engine.phase === 'MENU';
   const isComplete = engine.phase === 'GAME_COMPLETE';
 
+  if (mode === 'arena') {
+    return (
+      <div className="app-shell">
+        <BackgroundFX />
+        <ArenaApp onExit={() => setMode('classic')} />
+      </div>
+    );
+  }
+
   return (
     <div className="app-shell">
       <BackgroundFX />
@@ -75,6 +88,7 @@ export default function App() {
           stats={stats}
           soundOn={settings.sound}
           onPlay={handlePlayRequested}
+          onOpenArena={() => setMode('arena')}
           onOpenSettings={() => setSettingsOpen(true)}
           onToggleSound={handleToggleSound}
         />

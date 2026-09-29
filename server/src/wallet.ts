@@ -1,0 +1,72 @@
+import { nanoid } from 'nanoid';
+import { getTransactionsForUser, getUser, recordTransaction, upsertUser } from './store.js';
+import { STARTING_WALLET_BALANCE, type Transaction, type TransactionType, type User } from './types.js';
+
+export class InsufficientFundsError extends Error {
+  constructor() {
+    super('Insufficient wallet balance');
+  }
+}
+
+export function createGuestUser(name: string): User {
+  const user: User = {
+    id: nanoid(12),
+    name: name.trim().slice(0, 24) || 'Player',
+    walletBalance: STARTING_WALLET_BALANCE,
+    createdAt: Date.now(),
+  };
+  upsertUser(user);
+  recordTransaction({
+    id: nanoid(12),
+    userId: user.id,
+    type: 'topup',
+    amount: STARTING_WALLET_BALANCE,
+    balanceAfter: user.walletBalance,
+    timestamp: Date.now(),
+  });
+  return user;
+}
+
+function applyDelta(userId: string, type: TransactionType, amount: number, roomId?: string): User {
+  const user = getUser(userId);
+  if (!user) throw new Error('Unknown user');
+  const nextBalance = user.walletBalance + amount;
+  if (nextBalance < 0) throw new InsufficientFundsError();
+  const updated: User = { ...user, walletBalance: nextBalance };
+  upsertUser(updated);
+  const tx: Transaction = {
+    id: nanoid(12),
+    userId,
+    type,
+    amount,
+    roomId,
+    balanceAfter: updated.walletBalance,
+    timestamp: Date.now(),
+  };
+  recordTransaction(tx);
+  return updated;
+}
+
+/** Demo top-up only — this is where a real payment gateway callback would credit funds later. */
+export function topUp(userId: string, amount: number): User {
+  if (!Number.isFinite(amount) || amount <= 0 || amount > 100_000) {
+    throw new Error('Invalid top-up amount');
+  }
+  return applyDelta(userId, 'topup', Math.round(amount));
+}
+
+export function debitEntryFee(userId: string, amount: number, roomId: string): User {
+  return applyDelta(userId, 'entry_fee', -amount, roomId);
+}
+
+export function refundEntryFee(userId: string, amount: number, roomId: string): User {
+  return applyDelta(userId, 'refund', amount, roomId);
+}
+
+export function creditPayout(userId: string, amount: number, roomId: string): User {
+  return applyDelta(userId, 'payout', amount, roomId);
+}
+
+export function recentTransactions(userId: string): Transaction[] {
+  return getTransactionsForUser(userId);
+}

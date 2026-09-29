@@ -81,6 +81,10 @@
   animation: play-pulse 2.8s ease-in-out infinite;
 }
 
+.main-menu__arena {
+  min-width: 220px;
+}
+
 .main-menu__stats {
   display: flex;
   align-items: center;

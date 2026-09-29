@@ -7,11 +7,12 @@ interface MainMenuProps {
   stats: StoredStats;
   soundOn: boolean;
   onPlay: () => void;
+  onOpenArena: () => void;
   onOpenSettings: () => void;
   onToggleSound: () => void;
 }
 
-export function MainMenu({ stats, soundOn, onPlay, onOpenSettings, onToggleSound }: MainMenuProps) {
+export function MainMenu({ stats, soundOn, onPlay, onOpenArena, onOpenSettings, onToggleSound }: MainMenuProps) {
   return (
     <div className="main-menu no-select">
       <button
@@ -47,6 +48,16 @@ export function MainMenu({ stats, soundOn, onPlay, onOpenSettings, onToggleSound
       >
         <Button variant="primary" size="lg" className="main-menu__play" onClick={onPlay} autoFocus>
           PLAY
+        </Button>
+      </motion.div>
+
+      <motion.div
+        initial={{ opacity: 0, scale: 0.9 }}
+        animate={{ opacity: 1, scale: 1 }}
+        transition={{ delay: 0.2, duration: 0.45, ease: [0.2, 0.9, 0.32, 1] }}
+      >
+        <Button variant="secondary" size="lg" className="main-menu__arena" onClick={onOpenArena}>
+          🪙 Wager Arena (Multiplayer)
         </Button>
       </motion.div>
 
