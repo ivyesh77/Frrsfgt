@@ -6,14 +6,14 @@ import { debitEntryFee, refundEntryFee, creditPayout, InsufficientFundsError } f
 import { recordTransaction } from './store.js';
 import {
   getMatchDurationMs,
-  MAX_PLAYERS_PER_ROOM,
-  MIN_PLAYERS_TO_START,
+  roomFormatMeta,
   getReadyCountdownMs,
   STARTING_CHANCES,
   type ArcadeQuestionPublic,
   type GameKind,
   type MatchResultPlayer,
   type MatchResultPublic,
+  type RoomFormat,
   type RoomPlayer,
   type RoomPlayerPublic,
   type RoomStatePublic,
@@ -31,6 +31,9 @@ interface ActiveQuestion {
 class Room {
   id = nanoid(8);
   gameKind: GameKind;
+  format: RoomFormat;
+  maxPlayers: number;
+  winnerCount: number;
   entryFee: number;
   status: RoomStatus = 'waiting';
   players = new Map<string, RoomPlayer>();
@@ -40,9 +43,13 @@ class Room {
   activeQuestions = new Map<string, ActiveQuestion>();
   timers: NodeJS.Timeout[] = [];
 
-  constructor(gameKind: GameKind, entryFee: number) {
+  constructor(gameKind: GameKind, entryFee: number, format: RoomFormat) {
     this.gameKind = gameKind;
     this.entryFee = entryFee;
+    this.format = format;
+    const meta = roomFormatMeta(format);
+    this.maxPlayers = meta.players;
+    this.winnerCount = meta.winnerCount;
   }
 
   clearTimers() {
@@ -66,6 +73,7 @@ function toRoomPublic(room: Room): RoomStatePublic {
   return {
     id: room.id,
     gameKind: room.gameKind,
+    format: room.format,
     entryFee: room.entryFee,
     status: room.status,
     pool: room.pool,
@@ -86,10 +94,11 @@ export class RoomManager {
       .map((r) => ({
         id: r.id,
         gameKind: r.gameKind,
+        format: r.format,
         entryFee: r.entryFee,
         status: r.status,
         playerCount: r.players.size,
-        maxPlayers: MAX_PLAYERS_PER_ROOM,
+        maxPlayers: r.maxPlayers,
       }));
   }
 
@@ -98,8 +107,8 @@ export class RoomManager {
     return room ? toRoomPublic(room) : null;
   }
 
-  createRoom(gameKind: GameKind, entryFee: number): Room {
-    const room = new Room(gameKind, entryFee);
+  createRoom(gameKind: GameKind, entryFee: number, format: RoomFormat): Room {
+    const room = new Room(gameKind, entryFee, format);
     this.rooms.set(room.id, room);
     return room;
   }
@@ -121,7 +130,7 @@ export class RoomManager {
       this.broadcastRoom(room);
       return room;
     }
-    if (room.players.size >= MAX_PLAYERS_PER_ROOM) throw new Error('Room is full');
+    if (room.players.size >= room.maxPlayers) throw new Error('Room is full');
 
     debitEntryFee(user.id, room.entryFee, room.id); // throws InsufficientFundsError if short
     room.pool += room.entryFee;
@@ -153,7 +162,7 @@ export class RoomManager {
       refundEntryFee(userId, room.entryFee, room.id);
       room.pool -= room.entryFee;
       room.players.delete(userId);
-      if (room.status === 'countdown' && room.players.size < MIN_PLAYERS_TO_START) {
+      if (room.status === 'countdown' && room.players.size < room.maxPlayers) {
         room.status = 'waiting';
         room.countdownEndsAt = null;
         room.clearTimers();
@@ -183,7 +192,7 @@ export class RoomManager {
     this.broadcastRoom(room);
 
     const readyCount = [...room.players.values()].filter((p) => p.ready).length;
-    if (readyCount >= MIN_PLAYERS_TO_START && readyCount === room.players.size) {
+    if (readyCount >= room.maxPlayers && readyCount === room.players.size) {
       this.startCountdown(room);
     }
   }
@@ -268,6 +277,7 @@ export class RoomManager {
     const { ranked, isVoidMatch, winnerIds, platformCut, winnerPayoutTotal, payoutByUserId } = computeMatchPayout(
       room.pool,
       players.map((p) => ({ userId: p.userId, score: p.score, wrong: p.wrong, lastAnswerAt: p.lastAnswerAt })),
+      room.winnerCount,
     );
 
     const results: MatchResultPlayer[] = ranked.map((ranked_p) => {
@@ -303,6 +313,7 @@ export class RoomManager {
     const payload: MatchResultPublic = {
       roomId: room.id,
       gameKind: room.gameKind,
+      format: room.format,
       entryFee: room.entryFee,
       pool: room.pool,
       platformCut,

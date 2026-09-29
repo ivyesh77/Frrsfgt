@@ -29,13 +29,16 @@ export interface PayoutBreakdown {
  * outcome of live (randomized) gameplay, which made an earlier version of
  * this test suite occasionally flaky.
  *
- * Rooms are fixed 4-player matches: the top 2 scorers win and split the
- * winner pool (60/40, best to worst); the bottom 2 win nothing and are not
- * refunded (their entry fee is already part of the pool the winners split).
- * A player who never scores a single point is never eligible to win, even if
- * their rank would otherwise place them 2nd among non-scorers.
+ * `winnerCount` controls how many top scorers get paid: 1 for a 1v1 duel
+ * (winner takes the entire winner pool, loser gets nothing) or 2 for a
+ * 4-player squad match (top 2 scorers split the winner pool 60/40, best to
+ * worst; the bottom 2 win nothing and are not refunded — their entry fee is
+ * already part of the pool the winners split). Defaults to 2 (squad) to
+ * match every existing caller. A player who never scores a single point is
+ * never eligible to win, even if their rank would otherwise place them among
+ * the paid positions.
  */
-export function computeMatchPayout(pool: number, players: PayoutInputPlayer[]): PayoutBreakdown {
+export function computeMatchPayout(pool: number, players: PayoutInputPlayer[], winnerCount = 2): PayoutBreakdown {
   const ranked = players.slice().sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score;
     if (a.wrong !== b.wrong) return a.wrong - b.wrong;
@@ -50,9 +53,10 @@ export function computeMatchPayout(pool: number, players: PayoutInputPlayer[]): 
   const platformCut = isVoidMatch ? 0 : Math.round(pool * PLATFORM_FEE_RATE);
   const winnerPayoutTotal = pool - platformCut;
 
-  // Top 2 among players who actually scored take the pool. If only one player
-  // scored, they take all of it — a 0-score player never gets paid.
-  const winners = isVoidMatch ? [] : scorers.slice(0, 2);
+  // Top `winnerCount` among players who actually scored take the pool. If only
+  // one player scored (or winnerCount is 1, as in a duel), they take all of it —
+  // a 0-score player never gets paid.
+  const winners = isVoidMatch ? [] : scorers.slice(0, winnerCount);
   const payoutByUserId = new Map<string, number>();
   const [first, second] = winners;
   if (first && !second) {

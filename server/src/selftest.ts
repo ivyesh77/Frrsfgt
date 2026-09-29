@@ -207,6 +207,29 @@ function testPayoutMath(): void {
     assertOnce(r.platformCut === 0, 'payout: a void match takes zero platform cut');
     assertOnce(r.winnerPayoutTotal === 150, 'payout: a void match reserves the full pool for refunding (150)');
   }
+
+  // Duel (winnerCount=1): the winner takes the entire winner pool alone, never a split,
+  // even though both players scored and would have split it under the squad's winnerCount=2.
+  {
+    const r = computeMatchPayout(100, [
+      { userId: 'a', score: 5, wrong: 1, lastAnswerAt: 100 },
+      { userId: 'b', score: 2, wrong: 3, lastAnswerAt: 200 },
+    ], 1);
+    assertOnce(!r.isVoidMatch, 'duel payout: two scorers is never treated as a void match');
+    assertOnce(r.winnerIds.size === 1 && r.winnerIds.has('a'), 'duel payout: only the higher scorer is a winner');
+    assertOnce(r.payoutByUserId.get('a') === r.winnerPayoutTotal, 'duel payout: the winner takes the entire winner pool alone');
+    assertOnce((r.payoutByUserId.get('b') ?? 0) === 0, 'duel payout: the loser is paid nothing, even though they scored');
+  }
+
+  // Duel void match: nobody scored — full refund, same as a squad void match.
+  {
+    const r = computeMatchPayout(100, [
+      { userId: 'a', score: 0, wrong: 5, lastAnswerAt: 100 },
+      { userId: 'b', score: 0, wrong: 5, lastAnswerAt: 200 },
+    ], 1);
+    assertOnce(r.isVoidMatch, 'duel payout: an all-zero-score duel is correctly flagged as void');
+    assertOnce(r.winnerPayoutTotal === 100, 'duel payout: a void duel reserves the full pool for refunding');
+  }
 }
 
 async function main() {
@@ -252,6 +275,7 @@ async function main() {
     const createAck = await emitAck<{ ok: boolean; roomId: string }>(socket, 'rooms:create', {
       gameKind: 'memoryMatch',
       entryFee: 50,
+      format: 'squad',
     });
     assert(createAck.ok, 'room creation succeeds');
     const joinAck = await emitAck<{ ok: boolean }>(socket, 'rooms:join', { userId: alice.id, roomId: createAck.roomId });
@@ -272,6 +296,7 @@ async function main() {
     const createAck = await emitAck<{ ok: boolean; roomId: string }>(socket, 'rooms:create', {
       gameKind: 'memoryMatch',
       entryFee: 10000,
+      format: 'squad',
     });
     const joinAck = await emitAck<{ ok: boolean; error?: string }>(socket, 'rooms:join', {
       userId: alice.id,
@@ -294,6 +319,7 @@ async function main() {
     const createAck = await emitAck<{ ok: boolean; roomId: string }>(sockets.alice, 'rooms:create', {
       gameKind: 'memoryMatch',
       entryFee,
+      format: 'squad',
     });
     const roomId = createAck.roomId;
 
@@ -377,6 +403,7 @@ async function main() {
     const createAck = await emitAck<{ ok: boolean; roomId: string }>(sockets.dave, 'rooms:create', {
       gameKind: 'memoryMatch',
       entryFee,
+      format: 'squad',
     });
     const roomId = createAck.roomId;
     await Promise.all([
@@ -412,6 +439,66 @@ async function main() {
     const erinWallet = await getWallet(erin.id);
     assert(daveWallet.walletBalance === 1000, "void match leaves the player's wallet exactly unchanged (net)");
     assert(erinWallet.walletBalance === 1000, "void match leaves the player's wallet exactly unchanged (net)");
+
+    Object.values(sockets).forEach((s) => s.disconnect());
+  }
+
+  // --- 1v1 duel: starts at 2 players, winner takes the entire winner pool -----------
+  {
+    const entryFee = 50;
+    const heidi = await createGuest(`SelfTestHeidi_${suffix}`);
+    const ivan = await createGuest(`SelfTestIvan_${suffix}`);
+    const sockets = { heidi: connect(), ivan: connect() };
+    await Promise.all(Object.values(sockets).map((s) => new Promise<void>((r) => s.on('connect', () => r()))));
+
+    const createAck = await emitAck<{ ok: boolean; roomId: string }>(sockets.heidi, 'rooms:create', {
+      gameKind: 'memoryMatch',
+      entryFee,
+      format: 'duel',
+    });
+    const roomId = createAck.roomId;
+
+    const joinResults = await Promise.all([
+      emitAck<{ ok: boolean; room?: RoomStatePublic }>(sockets.heidi, 'rooms:join', { userId: heidi.id, roomId }),
+      emitAck<{ ok: boolean; room?: RoomStatePublic }>(sockets.ivan, 'rooms:join', { userId: ivan.id, roomId }),
+    ]);
+    assert(joinResults.every((r) => r.ok), 'a duel joins with just 2 players');
+    const roomAfterJoins = joinResults[1].room;
+    assert(!!roomAfterJoins && roomAfterJoins.format === 'duel', "the joined room reports format 'duel'");
+
+    // Both players get a real shot at scoring (rather than pinning one to 'always-wrong')
+    // so this stays a live end-to-end run without inflating the void-match chance the way
+    // a single guaranteed-loser would (each 'cycle' player only needs one lucky guess among
+    // their questions before their 5 chances run out).
+    const matchEndPromises = [
+      playUntilMatchEnds(sockets.heidi, heidi.id, roomId, 'cycle'),
+      playUntilMatchEnds(sockets.ivan, ivan.id, roomId, 'cycle'),
+    ];
+
+    // A duel only needs 2 ready players (its own capacity) to start — not the squad's 4.
+    await Promise.all([
+      emitAck(sockets.heidi, 'rooms:ready', { userId: heidi.id, roomId }),
+      emitAck(sockets.ivan, 'rooms:ready', { userId: ivan.id, roomId }),
+    ]);
+
+    const [resultHeidi] = await Promise.all(matchEndPromises);
+    if (!resultHeidi) throw new Error('match:end payload missing for the duel test');
+
+    assert(resultHeidi.format === 'duel', 'the match:end payload reports format \'duel\'');
+    assert(resultHeidi.pool === entryFee * 2, `duel pool equals sum of both entry fees (${entryFee * 2})`);
+    // The exact win-or-void outcome depends on live (randomized) guessing, same caveat as
+    // the squad test above — the deterministic payout math itself (winnerCount=1 takes it
+    // all, no split) is covered exhaustively and without any randomness in testPayoutMath().
+    if (!resultHeidi.isVoidMatch) {
+      const winners = resultHeidi.results.filter((r) => r.isWinner);
+      assert(winners.length === 1, 'a duel ever has exactly one winner, never a split');
+      const loser = resultHeidi.results.find((r) => !r.isWinner);
+      assert(
+        winners[0]?.payout === resultHeidi.winnerPayoutTotal,
+        'the duel winner takes the entire winner pool alone (no 1st/2nd split)',
+      );
+      assert(!!loser && loser.payout === 0, 'the duel loser is paid nothing');
+    }
 
     Object.values(sockets).forEach((s) => s.disconnect());
   }

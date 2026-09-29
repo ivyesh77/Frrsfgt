@@ -2,7 +2,7 @@ import { useCallback, useEffect, useReducer, useRef } from 'react';
 import { fetchWallet, guestLogin, topUpWallet, type AuthMode } from './api';
 import { getArenaSocket } from './socket';
 import { loadStoredIdentity, saveStoredIdentity } from './storage';
-import type { ArcadeQuestionPublic, ArenaUser, MatchResultPublic, RoomStatePublic, RoomSummary } from './types';
+import type { ArcadeQuestionPublic, ArenaUser, MatchResultPublic, RoomFormat, RoomStatePublic, RoomSummary } from './types';
 
 export type ArenaStage = 'login' | 'lobby' | 'room' | 'result';
 
@@ -210,15 +210,15 @@ export function useArena() {
 
   /**
    * Casino-style "pick a stake and play" flow: seats the player at an existing open
-   * table for this entry fee if one has room, otherwise opens a fresh table — the
-   * player never has to think about individual room ids or a separate create step.
+   * table for this entry fee + format if one has room, otherwise opens a fresh table —
+   * the player never has to think about individual room ids or a separate create step.
    */
-  const playAtFee = useCallback(async (entryFee: number) => {
+  const playAtFee = useCallback(async (entryFee: number, format: RoomFormat) => {
     if (!userRef.current) return;
     dispatch({ type: 'BUSY', busy: true });
 
     const openTable = roomsRef.current.find(
-      (r) => r.entryFee === entryFee && r.status === 'waiting' && r.playerCount < r.maxPlayers,
+      (r) => r.entryFee === entryFee && r.format === format && r.status === 'waiting' && r.playerCount < r.maxPlayers,
     );
 
     if (openTable) {
@@ -237,6 +237,7 @@ export function useArena() {
     const createAck = await emitAck<{ ok: boolean; roomId?: string; error?: string }>('rooms:create', {
       gameKind: 'memoryMatch',
       entryFee,
+      format,
     });
     if (!createAck.ok || !createAck.roomId) {
       dispatch({ type: 'ERROR', error: createAck.error ?? 'Could not start a table' });

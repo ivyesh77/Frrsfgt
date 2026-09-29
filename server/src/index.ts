@@ -5,7 +5,7 @@ import { Server } from 'socket.io';
 import { GAME_KIND_LABELS } from './gameKinds/index.js';
 import { RoomManager, InsufficientFundsError } from './rooms.js';
 import { findUserByName, getUser } from './store.js';
-import { ENTRY_FEE_TIERS, GAME_KINDS, type GameKind } from './types.js';
+import { ENTRY_FEE_TIERS, GAME_KINDS, ROOM_FORMATS, type GameKind, type RoomFormat } from './types.js';
 import { createGuestUser, recentTransactions, topUp } from './wallet.js';
 
 const PORT = Number(process.env.PORT) || 8787;
@@ -26,7 +26,7 @@ const roomManager = new RoomManager(io);
 // authenticated accounts can replace this layer without touching game logic)
 // ---------------------------------------------------------------------------
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, gameKinds: GAME_KINDS, entryFees: ENTRY_FEE_TIERS });
+  res.json({ ok: true, gameKinds: GAME_KINDS, entryFees: ENTRY_FEE_TIERS, formats: ROOM_FORMATS });
 });
 
 app.post('/api/auth/guest', (req, res) => {
@@ -83,13 +83,14 @@ app.get('/api/rooms', (req, res) => {
 const socketSessions = new Map<string, { userId: string; roomId: string }>();
 
 io.on('connection', (socket) => {
-  socket.on('rooms:create', (payload: { gameKind: GameKind; entryFee: number }, ack) => {
+  socket.on('rooms:create', (payload: { gameKind: GameKind; entryFee: number; format: RoomFormat }, ack) => {
     try {
       if (!GAME_KINDS.includes(payload.gameKind)) throw new Error('Invalid game kind');
       if (!ENTRY_FEE_TIERS.includes(payload.entryFee as (typeof ENTRY_FEE_TIERS)[number])) {
         throw new Error('Invalid entry fee tier');
       }
-      const room = roomManager.createRoom(payload.gameKind, payload.entryFee);
+      if (!ROOM_FORMATS.some((f) => f.id === payload.format)) throw new Error('Invalid room format');
+      const room = roomManager.createRoom(payload.gameKind, payload.entryFee, payload.format);
       ack?.({ ok: true, roomId: room.id });
     } catch (err) {
       ack?.({ ok: false, error: err instanceof Error ? err.message : 'Failed to create room' });

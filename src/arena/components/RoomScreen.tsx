@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import { Button } from '../../components/common/Button';
-import { GAME_KIND_LABELS, type ArcadeQuestionPublic, type ArenaUser, type RoomStatePublic } from '../types';
+import { GAME_KIND_LABELS, roomFormatMeta, type ArcadeQuestionPublic, type ArenaUser, type RoomStatePublic } from '../types';
 import type { AnswerFeedback } from '../useArena';
 import { useNow } from '../useNow';
 import { QuestionRenderer, type QuestionPhase } from './QuestionRenderer';
@@ -33,6 +33,7 @@ export function RoomScreen({
   const now = useNow(100);
   const me = room.players.find((p) => p.userId === user.id);
   const isReady = me?.ready ?? false;
+  const formatMeta = roomFormatMeta(room.format);
 
   const leaderboard = useMemo(
     () => [...room.players].sort((a, b) => b.score - a.score || a.chancesLeft - b.chancesLeft),
@@ -54,7 +55,8 @@ export function RoomScreen({
         <div>
           <h1 className="arena-title arena-title--sm">{GAME_KIND_LABELS[room.gameKind]}</h1>
           <p className="arena-subtitle arena-subtitle--sm">
-            Entry 🪙 {room.entryFee.toLocaleString()} · Pool 🪙 {room.pool.toLocaleString()}
+            {formatMeta.icon} {formatMeta.label} · Entry 🪙 {room.entryFee.toLocaleString()} · Pool 🪙{' '}
+            {room.pool.toLocaleString()}
           </p>
         </div>
         {room.status === 'waiting' && (
@@ -81,8 +83,10 @@ export function RoomScreen({
         <main className="arena-room__main glass-panel">
           {room.status === 'waiting' && (
             <div className="arena-waiting">
-              <p className="arena-empty">Waiting for all players to be ready…</p>
-              <p className="arena-fineprint">Minimum 2 players. The match starts once everyone taps Ready.</p>
+              <p className="arena-empty">Waiting for all {formatMeta.players} players to be ready…</p>
+              <p className="arena-fineprint">
+                {room.players.length}/{formatMeta.players} seated · {formatMeta.tagline}
+              </p>
             </div>
           )}
 
