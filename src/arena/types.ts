@@ -24,6 +24,18 @@ export const GAME_KIND_TAGLINES: Record<GameKind, string> = {
 
 export const ENTRY_FEE_TIERS = [10, 50, 100, 500, 1000, 5000, 10000] as const;
 
+/** Mirrors server/src/types.ts — used purely for client-side display math
+ *  (e.g. showing a room's potential win amount before joining). The server
+ *  is always the source of truth for the real payout at match end. */
+export const PLATFORM_FEE_RATE = 0.2; // 20% platform cut, 80% to the winner(s)
+export const MAX_PLAYERS_PER_ROOM = 8;
+export const MIN_PLAYERS_TO_START = 2;
+
+/** Winner's take of a pool of this size, rounded the same way the server rounds it. */
+export function winnerShareOf(pool: number): number {
+  return Math.round(pool * (1 - PLATFORM_FEE_RATE));
+}
+
 export interface ArenaUser {
   id: string;
   name: string;
@@ -96,3 +108,24 @@ export interface MatchResultPublic {
 export interface MemoryMatchPayload {
   assetId: string;
 }
+
+// --- Wallet ledger --------------------------------------------------------
+export type TransactionType = 'topup' | 'entry_fee' | 'refund' | 'payout' | 'platform_fee';
+
+export interface Transaction {
+  id: string;
+  userId: string;
+  type: TransactionType;
+  amount: number;
+  roomId?: string;
+  balanceAfter: number;
+  timestamp: number;
+}
+
+export const TRANSACTION_LABELS: Record<TransactionType, string> = {
+  topup: 'Top-up',
+  entry_fee: 'Entry fee',
+  refund: 'Refund',
+  payout: 'Match payout',
+  platform_fee: 'Platform fee',
+};

@@ -163,6 +163,19 @@
   align-items: center;
 }
 
+.arena-wallet--button {
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  transition: border-color 0.15s var(--ease-standard), transform 0.15s var(--ease-standard);
+}
+
+.arena-wallet--button:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-glow-accent);
+}
+
 .arena-wallet__label {
   font-size: 0.75rem;
   color: var(--text-muted);
@@ -173,10 +186,10 @@
   font-weight: 700;
 }
 
-.arena-wallet__topups {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
+.arena-wallet__cta {
+  font-size: 0.75rem;
+  color: var(--accent-b);
+  font-weight: 600;
 }
 
 .arena-chip {
@@ -268,39 +281,96 @@
   font-size: 0.9rem;
 }
 
-.arena-room-list {
+.arena-room-grid {
   list-style: none;
   margin: 0;
   padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 14px;
 }
 
-.arena-room-row {
+.arena-room-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 18px;
+  border-radius: var(--radius-lg);
+}
+
+.arena-room-card__top {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 16px;
-  border-radius: var(--radius-md);
-  gap: 12px;
-  flex-wrap: wrap;
+  gap: 8px;
 }
 
-.arena-room-row__info {
+.arena-room-card__status {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-secondary);
+}
+
+.arena-room-card__status--waiting {
+  color: var(--accent-success);
+  background: rgba(63, 224, 138, 0.14);
+}
+
+.arena-room-card__status--countdown {
+  color: var(--accent-warn);
+  background: rgba(255, 182, 72, 0.16);
+}
+
+.arena-room-card__status--live {
+  color: var(--accent-danger);
+  background: rgba(255, 92, 120, 0.14);
+}
+
+.arena-room-card__players {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.arena-room-card__stats {
+  display: flex;
+  gap: 10px;
+}
+
+.arena-room-card__stat {
+  flex: 1;
   display: flex;
   flex-direction: column;
   gap: 2px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  border: 1px solid var(--surface-border);
 }
 
-.arena-room-row__fee {
-  font-weight: 700;
+.arena-room-card__stat--win {
+  border-color: rgba(63, 224, 138, 0.35);
+  background: rgba(63, 224, 138, 0.08);
 }
 
-.arena-room-row__meta {
-  font-size: 0.78rem;
+.arena-room-card__stat-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
   color: var(--text-muted);
-  text-transform: capitalize;
+}
+
+.arena-room-card__stat-value {
+  font-weight: 700;
+  font-size: 1rem;
+}
+
+.arena-room-card__stat-value--win {
+  color: var(--accent-success);
 }
 
 /* ------------------------------------------------------------------ */
@@ -850,6 +920,127 @@
 
 .auth-modal__close:hover {
   color: var(--text-primary);
+}
+
+/* ------------------------------------------------------------------------ */
+/* Wallet modal                                                              */
+/* ------------------------------------------------------------------------ */
+.wallet-modal {
+  position: relative;
+  width: min(440px, 100%);
+  max-height: min(680px, 88vh);
+  padding: 30px 24px 24px;
+  border-radius: var(--radius-xl);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow: hidden;
+}
+
+.wallet-modal__header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wallet-modal__label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.wallet-modal__balance {
+  font-family: var(--font-display);
+  font-size: 2.1rem;
+  font-weight: 700;
+}
+
+.wallet-modal__topups {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.wallet-modal__topup-chip {
+  font-weight: 700;
+}
+
+.wallet-modal__history {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  flex: 1;
+  border-top: 1px solid var(--surface-border);
+  padding-top: 14px;
+}
+
+.wallet-modal__history-title {
+  font-size: 0.9rem;
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.wallet-tx-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 4px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+}
+
+.wallet-tx {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  border: 1px solid var(--surface-border);
+}
+
+.wallet-tx__main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.wallet-tx__type {
+  font-weight: 700;
+  font-size: 0.88rem;
+}
+
+.wallet-tx__time {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.wallet-tx__side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.wallet-tx__amount {
+  font-weight: 700;
+  font-size: 0.92rem;
+}
+
+.wallet-tx__amount--credit {
+  color: var(--accent-success);
+}
+
+.wallet-tx__amount--debit {
+  color: var(--accent-danger);
+}
+
+.wallet-tx__balance {
+  font-size: 0.7rem;
+  color: var(--text-muted);
 }
 
 .auth-tabs {
