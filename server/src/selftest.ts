@@ -503,6 +503,48 @@ async function main() {
     Object.values(sockets).forEach((s) => s.disconnect());
   }
 
+  // --- Wallet: deposit (top-up) and withdraw -----------------------------------------
+  {
+    const judy = await createGuest(`SelfTestJudy_${suffix}`);
+    assert((await getWallet(judy.id)).walletBalance === 1000, 'a fresh wallet starts at 1000 before any deposit/withdrawal');
+
+    const depositRes = await fetch(`${BASE_URL}/api/wallet/${judy.id}/topup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ amount: 500 }),
+    });
+    const depositBody = (await depositRes.json()) as { user: User };
+    assert(depositRes.status === 200 && depositBody.user.walletBalance === 1500, 'depositing 500 credits the wallet exactly (1000 -> 1500)');
+
+    const withdrawRes = await fetch(`${BASE_URL}/api/wallet/${judy.id}/withdraw`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ amount: 700 }),
+    });
+    const withdrawBody = (await withdrawRes.json()) as { user: User };
+    assert(withdrawRes.status === 200 && withdrawBody.user.walletBalance === 800, 'withdrawing 700 debits the wallet exactly (1500 -> 800)');
+
+    const overdraftRes = await fetch(`${BASE_URL}/api/wallet/${judy.id}/withdraw`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ amount: 999999 }),
+    });
+    const overdraftBody = (await overdraftRes.json()) as { error?: string };
+    assert(overdraftRes.status === 400 && !!overdraftBody.error, 'withdrawing more than the balance is rejected (400)');
+    assert((await getWallet(judy.id)).walletBalance === 800, 'a rejected overdraft withdrawal leaves the wallet untouched');
+
+    const invalidRes = await fetch(`${BASE_URL}/api/wallet/${judy.id}/withdraw`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ amount: -50 }),
+    });
+    assert(invalidRes.status === 400, 'withdrawing a negative amount is rejected (400)');
+
+    const txs = await (await fetch(`${BASE_URL}/api/wallet/${judy.id}`)).json() as { transactions: { type: string }[] };
+    assert(txs.transactions.some((t) => t.type === 'topup'), 'the ledger records the deposit as a topup transaction');
+    assert(txs.transactions.some((t) => t.type === 'withdrawal'), 'the ledger records the withdrawal as a withdrawal transaction');
+  }
+
   console.log('\n' + (failures === 0 ? 'ALL SELF-TESTS PASSED' : `${failures} SELF-TEST(S) FAILED`));
   process.exit(failures === 0 ? 0 : 1);
 }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react';
-import { fetchWallet, guestLogin, topUpWallet, type AuthMode } from './api';
+import { fetchWallet, guestLogin, topUpWallet, withdrawWallet, type AuthMode } from './api';
 import { getArenaSocket } from './socket';
 import { loadStoredIdentity, saveStoredIdentity } from './storage';
 import type { ArcadeQuestionPublic, ArenaUser, MatchResultPublic, RoomFormat, RoomStatePublic, RoomSummary } from './types';
@@ -204,7 +204,17 @@ export function useArena() {
       const user = await topUpWallet(userRef.current.id, amount);
       dispatch({ type: 'WALLET_REFRESHED', user });
     } catch (err) {
-      dispatch({ type: 'ERROR', error: err instanceof Error ? err.message : 'Top-up failed' });
+      dispatch({ type: 'ERROR', error: err instanceof Error ? err.message : 'Deposit failed' });
+    }
+  }, []);
+
+  const withdraw = useCallback(async (amount: number) => {
+    if (!userRef.current) return;
+    try {
+      const user = await withdrawWallet(userRef.current.id, amount);
+      dispatch({ type: 'WALLET_REFRESHED', user });
+    } catch (err) {
+      dispatch({ type: 'ERROR', error: err instanceof Error ? err.message : 'Withdrawal failed' });
     }
   }, []);
 
@@ -299,6 +309,7 @@ export function useArena() {
     login,
     refreshRooms,
     topUp,
+    withdraw,
     playAtFee,
     leaveRoom,
     setReady,

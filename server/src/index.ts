@@ -6,7 +6,7 @@ import { GAME_KIND_LABELS } from './gameKinds/index.js';
 import { RoomManager, InsufficientFundsError } from './rooms.js';
 import { findUserByName, getUser } from './store.js';
 import { ENTRY_FEE_TIERS, GAME_KINDS, ROOM_FORMATS, type GameKind, type RoomFormat } from './types.js';
-import { createGuestUser, recentTransactions, topUp } from './wallet.js';
+import { createGuestUser, recentTransactions, topUp, withdraw } from './wallet.js';
 
 const PORT = Number(process.env.PORT) || 8787;
 
@@ -69,6 +69,17 @@ app.post('/api/wallet/:userId/topup', (req, res) => {
     res.json({ user });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Top-up failed' });
+  }
+});
+
+app.post('/api/wallet/:userId/withdraw', (req, res) => {
+  const amount = Number(req.body?.amount);
+  try {
+    const user = withdraw(req.params.userId, amount);
+    res.json({ user });
+  } catch (err) {
+    const message = err instanceof InsufficientFundsError ? 'Insufficient wallet balance to withdraw that much' : (err as Error).message;
+    res.status(400).json({ error: message });
   }
 });
 

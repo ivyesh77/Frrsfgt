@@ -39,3 +39,13 @@ export async function topUpWallet(userId: string, amount: number): Promise<Arena
   const body = await parseOrThrow<{ user: ArenaUser }>(res);
   return body.user;
 }
+
+export async function withdrawWallet(userId: string, amount: number): Promise<ArenaUser> {
+  const res = await fetch(`/api/wallet/${userId}/withdraw`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ amount }),
+  });
+  const body = await parseOrThrow<{ user: ArenaUser }>(res);
+  return body.user;
+}

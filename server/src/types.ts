@@ -68,7 +68,7 @@ export interface User {
   createdAt: number;
 }
 
-export type TransactionType = 'topup' | 'entry_fee' | 'refund' | 'payout' | 'platform_fee';
+export type TransactionType = 'topup' | 'withdrawal' | 'entry_fee' | 'refund' | 'payout' | 'platform_fee';
 
 export interface Transaction {
   id: string;

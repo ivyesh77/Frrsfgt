@@ -150,7 +150,7 @@ export interface MemoryMatchPayload {
 }
 
 // --- Wallet ledger --------------------------------------------------------
-export type TransactionType = 'topup' | 'entry_fee' | 'refund' | 'payout' | 'platform_fee';
+export type TransactionType = 'topup' | 'withdrawal' | 'entry_fee' | 'refund' | 'payout' | 'platform_fee';
 
 export interface Transaction {
   id: string;
@@ -163,7 +163,8 @@ export interface Transaction {
 }
 
 export const TRANSACTION_LABELS: Record<TransactionType, string> = {
-  topup: 'Top-up',
+  topup: 'Deposit',
+  withdrawal: 'Withdrawal',
   entry_fee: 'Entry fee',
   refund: 'Refund',
   payout: 'Match payout',

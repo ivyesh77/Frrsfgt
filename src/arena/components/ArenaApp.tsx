@@ -39,6 +39,7 @@ export function ArenaApp() {
           busy={state.busy}
           onPlay={arena.playAtFee}
           onTopUp={arena.topUp}
+          onWithdraw={arena.withdraw}
         />
       )}
 

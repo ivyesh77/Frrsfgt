@@ -21,13 +21,19 @@ interface LobbyProps {
   busy: boolean;
   onPlay: (entryFee: number, format: RoomFormat) => void;
   onTopUp: (amount: number) => Promise<void> | void;
+  onWithdraw: (amount: number) => Promise<void> | void;
 }
+
+type FormatFilter = 'all' | RoomFormat;
 
 /** Casino-style lobby: pick a stake, hit Play — you're auto-seated at an open table for
  *  that stake, or a fresh one opens for you. No separate "create room" step, and every
  *  stake is always visible as its own table card (never an empty list). */
-export function Lobby({ user, rooms, busy, onPlay, onTopUp }: LobbyProps) {
+export function Lobby({ user, rooms, busy, onPlay, onTopUp, onWithdraw }: LobbyProps) {
   const [walletOpen, setWalletOpen] = useState(false);
+  const [filter, setFilter] = useState<FormatFilter>('all');
+
+  const visibleFormats = ROOM_FORMATS.filter((f) => filter === 'all' || f.id === filter);
 
   return (
     <div className="arena-lobby no-select">
@@ -39,7 +45,7 @@ export function Lobby({ user, rooms, busy, onPlay, onTopUp }: LobbyProps) {
         <button type="button" className="arena-wallet glass-panel arena-wallet--button" onClick={() => setWalletOpen(true)}>
           <span className="arena-wallet__label">Wallet</span>
           <span className="arena-wallet__value">🪙 {user.walletBalance.toLocaleString()}</span>
-          <span className="arena-wallet__cta">Top up · History →</span>
+          <span className="arena-wallet__cta">Deposit · Withdraw · History →</span>
         </button>
       </header>
 
@@ -51,7 +57,31 @@ export function Lobby({ user, rooms, busy, onPlay, onTopUp }: LobbyProps) {
         </div>
       </section>
 
-      {ROOM_FORMATS.map((format) => (
+      <div className="arena-format-filter" role="tablist" aria-label="Filter tables by format">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={filter === 'all'}
+          className={`arena-chip arena-format-filter__chip ${filter === 'all' ? 'arena-chip--active' : ''}`}
+          onClick={() => setFilter('all')}
+        >
+          All tables
+        </button>
+        {ROOM_FORMATS.map((f) => (
+          <button
+            key={f.id}
+            type="button"
+            role="tab"
+            aria-selected={filter === f.id}
+            className={`arena-chip arena-format-filter__chip ${filter === f.id ? 'arena-chip--active' : ''}`}
+            onClick={() => setFilter(f.id)}
+          >
+            {f.icon} {f.label}
+          </button>
+        ))}
+      </div>
+
+      {visibleFormats.map((format) => (
         <FormatSection
           key={format.id}
           format={format}
@@ -62,10 +92,18 @@ export function Lobby({ user, rooms, busy, onPlay, onTopUp }: LobbyProps) {
         />
       ))}
 
-      <WalletModal open={walletOpen} user={user} busy={false} onTopUp={onTopUp} onClose={() => setWalletOpen(false)} />
+      <WalletModal
+        open={walletOpen}
+        user={user}
+        busy={false}
+        onTopUp={onTopUp}
+        onWithdraw={onWithdraw}
+        onClose={() => setWalletOpen(false)}
+      />
     </div>
   );
 }
+
 
 interface FormatSectionProps {
   format: RoomFormatMeta;
@@ -132,7 +170,7 @@ function FormatSection({ format, rooms, user, busy, onPlay }: FormatSectionProps
               >
                 {seated > 0 ? `Join table (${seated}/${format.players})` : 'Play'}
               </Button>
-              {!affordable && <p className="arena-fineprint arena-fineprint--warn">Top up your wallet to play this table.</p>}
+              {!affordable && <p className="arena-fineprint arena-fineprint--warn">Deposit more ArenaCoin to play this table.</p>}
             </motion.li>
           );
         })}

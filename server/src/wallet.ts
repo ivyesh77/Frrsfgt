@@ -55,6 +55,19 @@ export function topUp(userId: string, amount: number): User {
   return applyDelta(userId, 'topup', Math.round(amount));
 }
 
+/** Demo cash-out only — this is where a real payout/crypto-transfer would debit funds later.
+ *  Withdrawing more than the current balance is rejected (never allows an overdraft). */
+export function withdraw(userId: string, amount: number): User {
+  if (!Number.isFinite(amount) || amount <= 0 || amount > 100_000) {
+    throw new Error('Invalid withdrawal amount');
+  }
+  const user = getUser(userId);
+  if (!user) throw new Error('Unknown user');
+  const roundedAmount = Math.round(amount);
+  if (roundedAmount > user.walletBalance) throw new InsufficientFundsError();
+  return applyDelta(userId, 'withdrawal', -roundedAmount);
+}
+
 export function debitEntryFee(userId: string, amount: number, roomId: string): User {
   return applyDelta(userId, 'entry_fee', -amount, roomId);
 }

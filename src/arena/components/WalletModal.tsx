@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Button } from '../../components/common/Button';
 import { fetchWalletDetail } from '../api';
@@ -9,10 +9,13 @@ interface WalletModalProps {
   user: ArenaUser;
   busy: boolean;
   onTopUp: (amount: number) => Promise<void> | void;
+  onWithdraw: (amount: number) => Promise<void> | void;
   onClose: () => void;
 }
 
-const TOP_UP_OPTIONS = [100, 500, 2000, 10000];
+const AMOUNT_OPTIONS = [100, 500, 2000, 10000];
+
+type WalletTab = 'deposit' | 'withdraw';
 
 function formatTime(ts: number): string {
   return new Date(ts).toLocaleString(undefined, {
@@ -28,19 +31,39 @@ function isCredit(type: Transaction['type']): boolean {
   return type === 'topup' || type === 'refund' || type === 'payout';
 }
 
-/** Full wallet view: live balance, top-up, and the real transaction ledger from the server —
- *  every entry fee debit, refund, payout, and top-up that has ever touched this wallet. */
-export function WalletModal({ open, user, busy, onTopUp, onClose }: WalletModalProps) {
+/** A stable, wallet-address-style id for flavor — purely cosmetic, derived from the guest
+ *  account id (never a real crypto address; this product never touches real currency). */
+function coinWalletId(userId: string): string {
+  return `ARC-${userId.slice(0, 10).toUpperCase()}`;
+}
+
+/** Full wallet view: live balance, ArenaCoin deposit/withdraw, and the real transaction
+ *  ledger from the server — every entry fee debit, refund, payout, deposit, and withdrawal
+ *  that has ever touched this wallet. */
+export function WalletModal({ open, user, busy, onTopUp, onWithdraw, onClose }: WalletModalProps) {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [toppingUp, setToppingUp] = useState<number | null>(null);
+  const [tab, setTab] = useState<WalletTab>('deposit');
+  const [pendingAmount, setPendingAmount] = useState<number | null>(null);
+  const [customAmount, setCustomAmount] = useState('');
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  /** Clears the scratch deposit/withdraw state so reopening the modal never shows a stale
+   *  custom amount or error message left over from the last time it was open. */
+  const handleClose = useCallback(() => {
+    setCustomAmount('');
+    setActionError(null);
+    setPendingAmount(null);
+    onClose();
+  }, [onClose]);
 
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
     // Intentional: this effect synchronizes with the external wallet API each time the modal
-    // opens (or the balance changes after a top-up) — the loading/error flags reset per-fetch.
+    // opens (or the balance changes after a deposit/withdrawal) — the loading/error flags reset
+    // per-fetch.
     // eslint-disable-next-line react/set-state-in-effect
     setLoading(true);
     setLoadError(null);
@@ -62,20 +85,41 @@ export function WalletModal({ open, user, busy, onTopUp, onClose }: WalletModalP
   useEffect(() => {
     if (!open) return;
     function onKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') handleClose();
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [open, onClose]);
+  }, [open, handleClose]);
 
-  async function handleTopUp(amount: number) {
-    setToppingUp(amount);
+  /** Switches Deposit/Withdraw tabs and clears any leftover amount/error from the other flow. */
+  function switchTab(next: WalletTab) {
+    setTab(next);
+    setCustomAmount('');
+    setActionError(null);
+  }
+
+  async function runAmount(amount: number) {
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setActionError('Enter a valid amount');
+      return;
+    }
+    if (tab === 'withdraw' && amount > user.walletBalance) {
+      setActionError('You cannot withdraw more than your wallet balance');
+      return;
+    }
+    setActionError(null);
+    setPendingAmount(amount);
     try {
-      await onTopUp(amount);
+      if (tab === 'deposit') await onTopUp(amount);
+      else await onWithdraw(amount);
+      setCustomAmount('');
     } finally {
-      setToppingUp(null);
+      setPendingAmount(null);
     }
   }
+
+  const customAmountNumber = Number(customAmount);
+  const customAmountValid = customAmount.trim() !== '' && Number.isFinite(customAmountNumber) && customAmountNumber > 0;
 
   return (
     <AnimatePresence>
@@ -90,7 +134,7 @@ export function WalletModal({ open, user, busy, onTopUp, onClose }: WalletModalP
           exit={{ opacity: 0 }}
           transition={{ duration: 0.2 }}
           onMouseDown={(e) => {
-            if (e.target === e.currentTarget) onClose();
+            if (e.target === e.currentTarget) handleClose();
           }}
         >
           <motion.div
@@ -100,29 +144,80 @@ export function WalletModal({ open, user, busy, onTopUp, onClose }: WalletModalP
             exit={{ opacity: 0, y: 12, scale: 0.98 }}
             transition={{ duration: 0.22, ease: [0.2, 0.9, 0.32, 1] }}
           >
-            <button type="button" className="auth-modal__close" aria-label="Close" onClick={onClose}>
+            <button type="button" className="auth-modal__close" aria-label="Close" onClick={handleClose}>
               ✕
             </button>
 
             <div className="wallet-modal__header">
-              <span className="wallet-modal__label">Wallet balance</span>
-              <span className="wallet-modal__balance">🪙 {user.walletBalance.toLocaleString()}</span>
+              <span className="wallet-modal__label">ArenaCoin balance</span>
+              <span className="wallet-modal__balance">🪙 {user.walletBalance.toLocaleString()} ARC</span>
+              <span className="wallet-modal__coin-id">{coinWalletId(user.id)}</span>
+            </div>
+
+            <div className="wallet-modal__tabs" role="tablist" aria-label="Deposit or withdraw">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={tab === 'deposit'}
+                className={`wallet-modal__tab ${tab === 'deposit' ? 'wallet-modal__tab--active' : ''}`}
+                onClick={() => switchTab('deposit')}
+              >
+                ⬇ Deposit
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={tab === 'withdraw'}
+                className={`wallet-modal__tab ${tab === 'withdraw' ? 'wallet-modal__tab--active' : ''}`}
+                onClick={() => switchTab('withdraw')}
+              >
+                ⬆ Withdraw
+              </button>
             </div>
 
             <div className="wallet-modal__topups">
-              {TOP_UP_OPTIONS.map((amount) => (
-                <button
-                  key={amount}
-                  type="button"
-                  className="arena-chip wallet-modal__topup-chip"
-                  disabled={busy || toppingUp !== null}
-                  onClick={() => void handleTopUp(amount)}
-                >
-                  {toppingUp === amount ? '…' : `+🪙 ${amount.toLocaleString()}`}
-                </button>
-              ))}
+              {AMOUNT_OPTIONS.map((amount) => {
+                const overBalance = tab === 'withdraw' && amount > user.walletBalance;
+                return (
+                  <button
+                    key={amount}
+                    type="button"
+                    className="arena-chip wallet-modal__topup-chip"
+                    disabled={busy || pendingAmount !== null || overBalance}
+                    onClick={() => void runAmount(amount)}
+                  >
+                    {pendingAmount === amount ? '…' : `${tab === 'deposit' ? '+' : '-'}🪙 ${amount.toLocaleString()}`}
+                  </button>
+                );
+              })}
             </div>
-            <p className="arena-fineprint">Practice currency only — no real payment is ever processed.</p>
+
+            <div className="wallet-modal__custom-amount">
+              <input
+                type="number"
+                inputMode="numeric"
+                min={1}
+                placeholder="Custom amount"
+                className="wallet-modal__custom-input"
+                value={customAmount}
+                disabled={busy || pendingAmount !== null}
+                onChange={(e) => setCustomAmount(e.target.value)}
+              />
+              <Button
+                variant="secondary"
+                size="md"
+                disabled={busy || pendingAmount !== null || !customAmountValid}
+                onClick={() => void runAmount(customAmountNumber)}
+              >
+                {tab === 'deposit' ? 'Deposit' : 'Withdraw'}
+              </Button>
+            </div>
+            {actionError && <p className="arena-fineprint arena-fineprint--warn">{actionError}</p>}
+
+            <p className="arena-fineprint">
+              ArenaCoin (ARC) is a practice, crypto-styled in-app currency — no real cryptocurrency or payment is
+              ever processed.
+            </p>
 
             <div className="wallet-modal__history">
               <h3 className="wallet-modal__history-title">Recent activity</h3>
@@ -152,7 +247,7 @@ export function WalletModal({ open, user, busy, onTopUp, onClose }: WalletModalP
               )}
             </div>
 
-            <Button variant="secondary" size="md" onClick={onClose}>
+            <Button variant="secondary" size="md" onClick={handleClose}>
               Close
             </Button>
           </motion.div>
