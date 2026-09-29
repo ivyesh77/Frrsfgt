@@ -112,23 +112,25 @@ export function Lobby({ user, rooms, onRefresh, onCreateRoom, onJoinRoom, onTopU
                   </span>
                 </div>
 
-                <div className="arena-room-card__stat arena-room-card__stat--fee">
-                  <span className="arena-room-card__stat-label">Entry fee</span>
-                  <span className="arena-room-card__stat-value">🪙 {room.entryFee.toLocaleString()}</span>
+                <div className="arena-room-card__entry">
+                  <span className="arena-room-card__entry-label">Entry fee</span>
+                  <span className="arena-room-card__entry-value">🪙 {room.entryFee.toLocaleString()}</span>
                 </div>
 
-                <div className="arena-room-card__stats">
-                  <div className="arena-room-card__stat arena-room-card__stat--win">
-                    <span className="arena-room-card__stat-label">🥇 1st place</span>
-                    <span className="arena-room-card__stat-value arena-room-card__stat-value--win">
-                      🪙 {split.first.toLocaleString()}
+                <div className="arena-room-card__prizes">
+                  <div className="arena-room-card__prize arena-room-card__prize--gold">
+                    <span className="arena-room-card__prize-medal" aria-hidden="true">
+                      🥇
                     </span>
+                    <span className="arena-room-card__prize-label">1st place</span>
+                    <span className="arena-room-card__prize-value">🪙 {split.first.toLocaleString()}</span>
                   </div>
-                  <div className="arena-room-card__stat arena-room-card__stat--win2">
-                    <span className="arena-room-card__stat-label">🥈 2nd place</span>
-                    <span className="arena-room-card__stat-value arena-room-card__stat-value--win">
-                      🪙 {split.second.toLocaleString()}
+                  <div className="arena-room-card__prize arena-room-card__prize--silver">
+                    <span className="arena-room-card__prize-medal" aria-hidden="true">
+                      🥈
                     </span>
+                    <span className="arena-room-card__prize-label">2nd place</span>
+                    <span className="arena-room-card__prize-value">🪙 {split.second.toLocaleString()}</span>
                   </div>
                 </div>
                 <p className="arena-room-card__note">Top 2 scores win · bottom 2 win nothing</p>
