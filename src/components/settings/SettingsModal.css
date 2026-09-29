@@ -1,0 +1,126 @@
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  background: rgba(4, 3, 12, 0.6);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.settings-modal {
+  width: min(94vw, 420px);
+  max-height: min(88vh, 640px);
+  overflow-y: auto;
+  border-radius: var(--radius-xl);
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.settings-modal__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.settings-modal__header h2 {
+  font-family: var(--font-display);
+  font-size: 1.3rem;
+}
+
+.settings-modal__close {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid var(--surface-border);
+  background: var(--surface);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 2px;
+  border-bottom: 1px solid var(--surface-border);
+}
+
+.settings-row:last-of-type {
+  border-bottom: none;
+}
+
+.settings-row__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-row__label {
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.settings-row__desc {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.settings-toggle {
+  position: relative;
+  width: 46px;
+  height: 26px;
+  border-radius: 999px;
+  border: none;
+  background: rgba(255, 255, 255, 0.14);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.2s var(--ease-standard);
+}
+
+.settings-toggle--on {
+  background: linear-gradient(135deg, var(--accent-b), var(--accent-a));
+}
+
+.settings-toggle__thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: white;
+  transition: transform 0.2s var(--ease-standard);
+}
+
+.settings-toggle--on .settings-toggle__thumb {
+  transform: translateX(20px);
+}
+
+.settings-modal__danger {
+  margin-top: 6px;
+  padding-top: 12px;
+  border-top: 1px solid var(--surface-border);
+}
+
+.settings-modal__confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.settings-modal__confirm-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.settings-modal__confirm-actions > * {
+  flex: 1;
+}

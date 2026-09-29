@@ -1,0 +1,65 @@
+.answer-card {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  cursor: pointer;
+  overflow: hidden;
+  box-shadow: var(--shadow-card), 0 0 0 1px var(--surface-border) inset;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.answer-card:disabled {
+  cursor: default;
+}
+
+.answer-card__tile {
+  border-radius: var(--radius-lg);
+}
+
+.answer-card--default:not(:disabled):hover {
+  box-shadow: var(--shadow-card), 0 0 0 2px rgba(255, 255, 255, 0.35) inset;
+}
+
+.answer-card--dim {
+  opacity: 0.4;
+  filter: grayscale(0.3);
+}
+
+.answer-card__ring {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-lg);
+  pointer-events: none;
+}
+
+.answer-card__ring--success {
+  box-shadow: var(--shadow-glow-success);
+  background: linear-gradient(0deg, rgba(63, 224, 138, 0.22), transparent 55%);
+}
+
+.answer-card__ring--danger {
+  box-shadow: var(--shadow-glow-danger);
+  background: linear-gradient(0deg, rgba(255, 92, 120, 0.28), transparent 55%);
+}
+
+.answer-card__badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--accent-success);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 12px rgba(63, 224, 138, 0.5);
+}
+
+.answer-card--correct-revealed {
+  box-shadow: var(--shadow-glow-success);
+}

@@ -1,0 +1,77 @@
+.mm-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  isolation: isolate;
+}
+
+.mm-button--md {
+  padding: 14px 28px;
+  font-size: clamp(0.95rem, 0.9rem + 0.3vw, 1.05rem);
+}
+
+.mm-button--lg {
+  padding: 18px 44px;
+  font-size: clamp(1.1rem, 1rem + 0.6vw, 1.3rem);
+}
+
+.mm-button--primary {
+  color: #0b0b16;
+  background: linear-gradient(135deg, var(--accent-b), var(--accent-a));
+  box-shadow:
+    0 12px 30px rgba(139, 107, 255, 0.35),
+    0 0 0 1px rgba(255, 255, 255, 0.12) inset;
+}
+
+.mm-button--primary:hover {
+  box-shadow:
+    0 16px 38px rgba(139, 107, 255, 0.5),
+    0 0 0 1px rgba(255, 255, 255, 0.18) inset;
+}
+
+.mm-button--secondary {
+  color: var(--text-primary);
+  background: var(--surface-strong);
+  border: 1px solid var(--surface-border);
+}
+
+.mm-button--secondary:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.mm-button--ghost {
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--surface-border);
+}
+
+.mm-button--ghost:hover {
+  color: var(--text-primary);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.mm-button--danger {
+  color: #2a0b12;
+  background: linear-gradient(135deg, #ff8fa3, var(--accent-danger));
+}
+
+.mm-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.mm-button__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+}

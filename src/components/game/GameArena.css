@@ -1,0 +1,49 @@
+.game-arena {
+  position: relative;
+  width: min(94vw, 560px);
+  aspect-ratio: 1 / 1;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(3, 1fr);
+  grid-template-areas:
+    'tl . tr'
+    '. center .'
+    'bl . br';
+  gap: clamp(10px, 3vw, 22px);
+}
+
+.game-arena__cell {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+
+.game-arena__cell--tl {
+  grid-area: tl;
+}
+.game-arena__cell--tr {
+  grid-area: tr;
+}
+.game-arena__cell--bl {
+  grid-area: bl;
+}
+.game-arena__cell--br {
+  grid-area: br;
+}
+.game-arena__cell--center {
+  grid-area: center;
+}
+
+.game-arena__placeholder {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-lg);
+  border: 1.5px dashed rgba(255, 255, 255, 0.08);
+}
+
+@media (max-width: 420px) {
+  .game-arena {
+    width: 100%;
+  }
+}
