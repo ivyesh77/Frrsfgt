@@ -27,6 +27,13 @@ export function newQuestionId(): string {
   return nanoid(10);
 }
 
+/** A freshly-random, per-round opaque token — used both for round ids and for each
+ *  option's answer token. Callers must never derive meaning from its value; it is only
+ *  ever compared for exact equality against the server's own stored state. */
+export function newRoundToken(): string {
+  return nanoid(16);
+}
+
 export function randomInt(min: number, max: number): number {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }

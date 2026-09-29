@@ -14,6 +14,7 @@ dist-ssr
 
 # Backend runtime data (wallets/ledger) — never committed, regenerated on first run
 server/data/store.json
+*.tsbuildinfo
 
 # Editor directories and files
 .vscode/*
