@@ -74,8 +74,22 @@ function setSessionCookie(res: Response, token: string): void {
 }
 
 function requireAuth(req: Request, res: Response, next: NextFunction): void {
-  const token = req.cookies?.[SESSION_COOKIE] as string | undefined;
-  const userId = resolveSession(token);
+  // Prefer an explicit `Authorization: Bearer <token>` header when present, falling back
+  // to the cookie. Both carry exactly the same kind of opaque, server-issued, unguessable
+  // session token from createSession() — neither is a client-asserted identity of any
+  // kind. The bearer-header path exists because this sandbox's live-preview tunnel embeds
+  // the app in a cross-site iframe on a different top-level origin, and some browsers
+  // (Safari ITP, Firefox ETP, and an increasing share of Chrome) block ALL cookies set
+  // from inside a cross-site iframe outright — regardless of SameSite/Secure attributes —
+  // as a blanket third-party-cookie policy, not just a SameSite rule. A cookie can never
+  // work around that; an explicit header the client attaches itself can, because it isn't
+  // subject to any cookie policy at all. A real, non-iframed production deployment keeps
+  // working exactly as before purely on the cookie — the header is additive, never a
+  // replacement for the cookie-based flow documented in SECURITY_FIX_REPORT.md.
+  const authHeader = req.headers.authorization;
+  const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice('Bearer '.length) : undefined;
+  const cookieToken = req.cookies?.[SESSION_COOKIE] as string | undefined;
+  const userId = resolveSession(bearerToken ?? cookieToken);
   if (!userId) {
     res.status(401).json({ error: 'Not authenticated' });
     return;
@@ -136,7 +150,12 @@ app.post('/api/auth/signup', signupLimiter, async (req, res) => {
     const user = await registerUser(name, password);
     const { token } = createSession(user.id);
     setSessionCookie(res, token);
-    res.json({ user: toPublicUser(user) });
+    // `token` is also returned in the body as a fallback transport for exactly the
+    // scenario described on requireAuth() above (cross-site-iframe cookie blocking). The
+    // client only holds this in memory for the lifetime of the tab (see src/arena/api.ts)
+    // — never localStorage — so it carries the same "gone on a hard refresh unless the
+    // cookie also happens to work" trade-off as any other in-memory credential.
+    res.json({ user: toPublicUser(user), token });
   } catch (err) {
     if (err instanceof UsernameTakenError) return res.status(409).json({ error: err.message });
     res.status(400).json({ error: err instanceof Error ? err.message : 'Sign up failed' });
@@ -152,7 +171,7 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
     const user = await authenticateUser(name, password);
     const { token } = createSession(user.id);
     setSessionCookie(res, token);
-    res.json({ user: toPublicUser(user) });
+    res.json({ user: toPublicUser(user), token });
   } catch (err) {
     if (err instanceof InvalidCredentialsError) return res.status(401).json({ error: err.message });
     res.status(400).json({ error: err instanceof Error ? err.message : 'Log in failed' });
@@ -160,8 +179,10 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
 });
 
 app.post('/api/auth/logout', (req, res) => {
-  const token = req.cookies?.[SESSION_COOKIE] as string | undefined;
-  destroySession(token);
+  const authHeader = req.headers.authorization;
+  const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice('Bearer '.length) : undefined;
+  const cookieToken = req.cookies?.[SESSION_COOKIE] as string | undefined;
+  destroySession(bearerToken ?? cookieToken);
   res.clearCookie(SESSION_COOKIE, { path: '/' });
   res.json({ ok: true });
 });
@@ -226,13 +247,19 @@ app.get('/api/rooms', (req, res) => {
 // there is no id field left for it to substitute.
 // ---------------------------------------------------------------------------
 io.use((socket, next) => {
+  // Same dual transport as requireAuth() above: prefer the explicit auth token the client
+  // sent in the Socket.IO handshake's own `auth` payload (socket.io's standard mechanism
+  // for exactly this — see socket.ts on the client) and fall back to the session cookie.
+  // Both resolve through the identical resolveSession() — there is still no client-
+  // supplied userId anywhere in this handshake, only an opaque, server-issued token.
+  const authToken = typeof socket.handshake.auth?.token === 'string' ? socket.handshake.auth.token : undefined;
   const cookieHeader = socket.handshake.headers.cookie;
-  const token = cookieHeader
+  const cookieToken = cookieHeader
     ?.split(';')
     .map((p) => p.trim())
     .find((p) => p.startsWith(`${SESSION_COOKIE}=`))
     ?.slice(SESSION_COOKIE.length + 1);
-  const userId = resolveSession(token ? decodeURIComponent(token) : undefined);
+  const userId = resolveSession(authToken ?? (cookieToken ? decodeURIComponent(cookieToken) : undefined));
   if (!userId) {
     next(new Error('Unauthorized'));
     return;
