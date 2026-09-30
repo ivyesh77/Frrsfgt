@@ -70,6 +70,7 @@ type Action =
   | { type: 'RESET_TO_LOBBY' }
   | { type: 'VIEW_PROFILE' }
   | { type: 'LOGOUT' }
+  | { type: 'SESSION_EXPIRED' }
   | { type: 'ERROR'; error: string | null }
   | { type: 'DISMISS_NOTICE' };
 
@@ -173,6 +174,8 @@ function reducer(state: ArenaState, action: Action): ArenaState {
       return { ...state, stage: 'profile', error: null };
     case 'LOGOUT':
       return { ...initialState, bootstrapping: false };
+    case 'SESSION_EXPIRED':
+      return { ...initialState, bootstrapping: false, error: 'Your session expired — please sign in again.' };
     case 'ERROR':
       return { ...state, error: action.error, busy: false };
     case 'DISMISS_NOTICE':
@@ -235,6 +238,21 @@ export function useArena() {
     if (!state.user) return;
     const socket = getArenaSocket();
 
+    // If the socket's session cookie is ever stale/invalid by the time it reaches the
+    // server (e.g. the server process restarted since this tab logged in, or the session
+    // simply expired), the server's io.use() middleware rejects the handshake outright.
+    // Without handling this, every subsequent emit (queue:join, rooms:ready, ...) would
+    // just sit forever waiting for an ack that will never come — from the player's
+    // perspective, clicking "Find Match" would silently do nothing. Instead, treat it the
+    // same as being logged out: bounce back to the login screen with a clear message so
+    // the user can sign back in and get a fresh, valid session immediately.
+    const onConnectError = (err: Error) => {
+      if (err.message !== 'Unauthorized') return; // transient network hiccup — socket.io will retry on its own
+      disconnectArenaSocket();
+      dispatch({ type: 'SESSION_EXPIRED' });
+    };
+    socket.on('connect_error', onConnectError);
+
     const onRoomUpdate = (room: RoomStatePublic) => dispatch({ type: 'ROOM_UPDATE', room });
     const onMatchFound = (room: RoomStatePublic) => dispatch({ type: 'MATCH_FOUND', room });
     const onMatchCancelled = (payload: { reason: string }) => dispatch({ type: 'MATCH_CANCELLED', reason: payload.reason });
@@ -256,6 +274,7 @@ export function useArena() {
     socket.on('match:end', onMatchEnd);
 
     return () => {
+      socket.off('connect_error', onConnectError);
       socket.off('room:update', onRoomUpdate);
       socket.off('match:found', onMatchFound);
       socket.off('match:cancelled', onMatchCancelled);
