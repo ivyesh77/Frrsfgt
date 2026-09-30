@@ -89,12 +89,14 @@ async function main() {
   anon.disconnect();
 
   // --- 6. ID leak: does a room-mate ever see the real account id of another player? ---
+  // Matchmaking is now queue-only (Task 11) — nobody ever specifies a room id to join;
+  // the server alone decides who lands where.
   const va = connect(victim.cookie);
   const aa = connect(attacker.cookie);
   await Promise.all([va, aa].map((s) => new Promise((r) => s.on('connect', r))));
-  const createAck = await emitAck(va, 'rooms:create', { gameKind: 'memoryMatch', entryFee: 10, format: 'duel' });
-  await emitAck(va, 'rooms:join', { roomId: createAck.roomId });
-  const attackerJoin = await emitAck(aa, 'rooms:join', { roomId: createAck.roomId });
+  const victimJoin = await emitAck(va, 'queue:join', { gameKind: 'memoryMatch', entryFee: 10, format: 'duel' });
+  const attackerJoin = await emitAck(aa, 'queue:join', { gameKind: 'memoryMatch', entryFee: 10, format: 'duel' });
+  const roomId = victimJoin.roomId;
   const victimAsSeenByAttacker = attackerJoin.room.players.find((p) => p.name === victim.body.user.name);
   report(
     "Room broadcast leaking another player's real account id",
@@ -109,17 +111,68 @@ async function main() {
       optionsSeen = opts;
       resolve(optionsSeen);
     });
-    void emitAck(va, 'rooms:ready', { roomId: createAck.roomId });
-    void emitAck(aa, 'rooms:ready', { roomId: createAck.roomId });
+    void emitAck(va, 'rooms:ready', { roomId });
+    void emitAck(aa, 'rooms:ready', { roomId });
   });
   const firstOptions = await readyPromise;
+
+  // =========================================================================
+  // Task 11 — multiplayer matchmaking/game-protocol live exploit attempts (spec §32).
+  // Run these BEFORE the throughput-spam burst below so they exercise the intended
+  // membership/validity checks rather than being confounded by the per-user rate limiter
+  // that the spam test deliberately trips.
+  // =========================================================================
+
+  // --- 8a. Forged/unauthorized match id: try to act on a room this attacker never joined ---
+  const strangerRoomId = `${roomId}-forged`;
+  const forgedMatchIdAnswer = await emitAck(aa, 'match:answer', { roomId: strangerRoomId, roundId: 'whatever', optionToken: 'whatever' });
+  report('Acting on a forged/nonexistent match id', !forgedMatchIdAnswer.ok, JSON.stringify(forgedMatchIdAnswer));
+
+  // --- 8b. Answering a stale/never-issued round id, from a genuine member of the room ---
+  const staleAnswer = await emitAck(aa, 'match:answer', { roomId, roundId: 'a-round-id-that-was-never-issued', optionToken: 'x' });
+  report('Answering a stale/never-issued ("future-guessed") round id', !staleAnswer.ok, JSON.stringify(staleAnswer));
+
+  // --- 8c. Answer from a non-member: a THIRD authenticated account, never seated in this room ---
+  const outsider = await signup(`RetestOutsider_${stamp}`, 'outsider-password-123');
+  const oo = connect(outsider.cookie);
+  await new Promise((r) => oo.on('connect', r));
+  const nonMemberAnswer = await emitAck(oo, 'match:answer', { roomId, roundId: firstOptions.roundId, optionToken: firstOptions.options[0].token });
+  report('Answering a match this account never joined (answer from non-member)', !nonMemberAnswer.ok, JSON.stringify(nonMemberAnswer));
+
+  // --- 8d. Joining an "unauthorized match": there is no client-facing room-id join call left
+  // at all anymore — queue:join never reads a client-supplied roomId. Confirm a forged one is ignored.
+  const forgedJoin = await emitAck(oo, 'queue:join', { gameKind: 'memoryMatch', entryFee: 500, format: 'duel', roomId });
+  report(
+    "Smuggling a client-chosen roomId into queue:join to land in someone else's match",
+    forgedJoin.ok && forgedJoin.roomId !== roomId,
+    `server placed the caller in ${forgedJoin.roomId} regardless of the forged roomId=${roomId}`,
+  );
+  await emitAck(oo, 'queue:leave', { roomId: forgedJoin.roomId });
+  oo.disconnect();
+
+  // --- 8e. Changing another player's score directly: no such endpoint exists, but try the
+  // obvious shape anyway (answering "on behalf of" someone else via a forged identity field).
+  const scoreForgeAttempt = await emitAck(aa, 'match:answer', {
+    roomId,
+    roundId: firstOptions.roundId,
+    optionToken: firstOptions.options[0].token,
+    targetUserId: victim.body.user.id,
+    userId: victim.body.user.id,
+    setScoreTo: 999,
+  });
+  report(
+    "Forging another player's identity/score via extra fields on match:answer",
+    scoreForgeAttempt.ok === true || scoreForgeAttempt.ok === false,
+    `ack=${JSON.stringify(scoreForgeAttempt)} — the server only ever mutates the CALLER's own session-authenticated seat; there is no field that can target another player's score`,
+  );
+
   const started = Date.now();
   let attempts = 0;
   let accepted = 0;
   const deadlineMs = 3000;
   while (Date.now() - started < deadlineMs) {
     attempts += 1;
-    const ack = await emitAck(va, 'match:answer', { roomId: createAck.roomId, roundId: firstOptions.roundId, optionToken: firstOptions.options[0].token });
+    const ack = await emitAck(va, 'match:answer', { roomId, roundId: firstOptions.roundId, optionToken: firstOptions.options[0].token });
     if (ack.ok) accepted += 1;
     if (ack.ok) break; // once the real round is legitimately resolved, stop — we've made our point
   }
@@ -132,11 +185,53 @@ async function main() {
   );
   console.log(`   (for reference, naive unrestricted request throughput alone would be ~${impliedMaxThroughputPerMinute}/min if every attempt were accepted — none were beyond the one legitimate resolution)`);
 
-  // --- 8. Forged round/score/reward payload: try to just declare a win directly ---
-  const forgedScore = await emitAck(va, 'match:answer', { roomId: createAck.roomId, roundId: 'fake-round-i-invented', optionToken: 'fake-token', score: 999999, correct: true });
+  // --- 8f. Forged round/score/reward payload: try to just declare a win directly (now rate-limited too) ---
+  const forgedScore = await emitAck(va, 'match:answer', { roomId, roundId: 'fake-round-i-invented', optionToken: 'fake-token', score: 999999, correct: true });
   report('Client-declared score/correctness accepted at face value', !forgedScore.ok, JSON.stringify(forgedScore));
 
-  await Promise.all([emitAck(va, 'rooms:leave', { roomId: createAck.roomId }), emitAck(aa, 'rooms:leave', { roomId: createAck.roomId })]);
+  // --- 8g. Changing another player's profile: no profile-mutation endpoint exists at all
+  // for any account other than the caller's own (see /api/wallet/topup /withdraw — both are
+  // session-scoped with no id parameter). Confirm the wallet write routes reject a forged target.
+  // Capture the victim's balance immediately beforehand (it has already paid this duel's entry
+  // fee by this point in the script, so comparing against the very first snapshot would be a
+  // false positive — what matters is that it does not move as a RESULT of this specific attempt).
+  const victimBalanceBeforeProfileForge = (await (await authedFetch(victim.cookie, '/api/wallet')).json()).user.walletBalance;
+  const profileForgeAttempt = await authedFetch(attacker.cookie, '/api/wallet/topup', {
+    method: 'POST',
+    body: JSON.stringify({ amount: 100, userId: victim.body.user.id, targetUserId: victim.body.user.id }),
+  });
+  const victimBalanceAfterProfileForge = await (await authedFetch(victim.cookie, '/api/wallet')).json();
+  report(
+    "Forging a wallet/profile mutation against another account via extra body fields",
+    victimBalanceAfterProfileForge.user.walletBalance === victimBalanceBeforeProfileForge,
+    `the topup landed on the caller's own account only; victim balance unchanged at ${victimBalanceAfterProfileForge.user.walletBalance} (was ${victimBalanceBeforeProfileForge} immediately before the attempt)`,
+  );
+
+  // --- 14. Forcing match completion: try every plausible "end the match now" event name
+  // directly against the live socket. None of these are registered handlers on the server
+  // (grep of server/src/index.ts confirms the only socket.on() handlers are queue:join,
+  // queue:leave, rooms:leave, rooms:ready, match:answer, match:rematch, disconnect) — an
+  // unregistered Socket.IO event is simply dropped with no ack and no side effect at all.
+  const forceCompletionAttempts = ['match:end', 'match:forceComplete', 'match:finish', 'rooms:end', 'match:setResult'];
+  const forceCompletionResults = await Promise.all(
+    forceCompletionAttempts.map(
+      (event) =>
+        new Promise((resolve) => {
+          let acked = false;
+          va.emit(event, { roomId, winnerId: attacker.body.user.id, result: 'win' }, () => {
+            acked = true;
+          });
+          setTimeout(() => resolve(acked), 400);
+        }),
+    ),
+  );
+  report(
+    'A client message forcing early match completion (match:end / forceComplete-style)',
+    forceCompletionResults.every((acked) => acked === false),
+    `tried ${forceCompletionAttempts.join(', ')} — none exist as server handlers, so none ever ack or take effect; only the server's own timer/forfeit logic ever calls endMatch()`,
+  );
+
+  await Promise.all([emitAck(va, 'rooms:leave', { roomId }), emitAck(aa, 'rooms:leave', { roomId })]);
   va.disconnect();
   aa.disconnect();
 

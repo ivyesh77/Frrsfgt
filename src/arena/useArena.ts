@@ -25,8 +25,9 @@ export interface ActiveRoundView {
   answerDeadline: number | null;
   minAnswerAt: number | null;
   /** Set once the server has told us this exact round is over (either we answered, or it
-   *  timed out) — `pickedToken` is null for a timeout. */
-  resolution: { correct: boolean; correctToken: string; pickedToken: string | null } | null;
+   *  timed out) — `pickedToken` is null for a timeout. `scoreAfter` is the server's own
+   *  authoritative score right after this round resolved, never computed client-side. */
+  resolution: { correct: boolean; correctToken: string; pickedToken: string | null; scoreAfter: number } | null;
 }
 
 interface ArenaState {
@@ -39,7 +40,12 @@ interface ArenaState {
   round: ActiveRoundView | null;
   matchResult: MatchResultPublic | null;
   error: string | null;
+  notice: string | null;
   busy: boolean;
+  /** Bumped every time a fresh `match:found` event arrives, purely so the matchmaking
+   *  screen can key a one-shot entrance animation off of it instead of re-playing on every
+   *  incidental room:update. */
+  matchFoundToken: number;
 }
 
 type Action =
@@ -52,17 +58,20 @@ type Action =
   | { type: 'ROOMS_LIST'; rooms: RoomSummary[] }
   | { type: 'BUSY'; busy: boolean }
   | { type: 'JOIN_ROOM_SUCCESS'; room: RoomStatePublic }
+  | { type: 'MATCH_FOUND'; room: RoomStatePublic }
   | { type: 'ROOM_UPDATE'; room: RoomStatePublic }
+  | { type: 'MATCH_CANCELLED'; reason: string }
   | { type: 'LEAVE_ROOM' }
   | { type: 'ROUND_REVEAL'; reveal: RoundRevealPublic }
   | { type: 'ROUND_OPTIONS'; options: RoundOptionsPublic }
-  | { type: 'ROUND_ANSWERED'; roundId: string; correct: boolean; correctToken: string; pickedToken: string }
+  | { type: 'ROUND_ANSWERED'; roundId: string; correct: boolean; correctToken: string; pickedToken: string; score: number }
   | { type: 'ROUND_TIMEOUT'; timeout: RoundTimeoutPublic }
   | { type: 'MATCH_END'; result: MatchResultPublic }
   | { type: 'RESET_TO_LOBBY' }
   | { type: 'VIEW_PROFILE' }
   | { type: 'LOGOUT' }
-  | { type: 'ERROR'; error: string | null };
+  | { type: 'ERROR'; error: string | null }
+  | { type: 'DISMISS_NOTICE' };
 
 const initialState: ArenaState = {
   stage: 'login',
@@ -74,7 +83,9 @@ const initialState: ArenaState = {
   round: null,
   matchResult: null,
   error: null,
+  notice: null,
   busy: false,
+  matchFoundToken: 0,
 };
 
 function reducer(state: ArenaState, action: Action): ArenaState {
@@ -97,9 +108,22 @@ function reducer(state: ArenaState, action: Action): ArenaState {
       return { ...state, busy: action.busy };
     case 'JOIN_ROOM_SUCCESS':
       return { ...state, stage: 'room', room: action.room, busy: false, error: null, round: null, matchResult: null };
-    case 'ROOM_UPDATE':
-      if (!state.room || state.room.id !== action.room.id) return state;
-      return { ...state, room: action.room };
+    case 'MATCH_FOUND':
+      // A fresh room-scoped id just filled up — play the "match found" entrance once.
+      if (state.room && state.room.id === action.room.id) return { ...state, room: action.room };
+      return { ...state, stage: 'room', room: action.room, matchFoundToken: state.matchFoundToken + 1 };
+    case 'ROOM_UPDATE': {
+      // A resumed/late room:update (e.g. after a page refresh mid-match, or the server
+      // silently re-attaching a reconnecting socket) should bring the player straight back
+      // into the room view rather than leaving them stranded on the lobby screen.
+      if (action.room.status === 'finished' || action.room.status === 'cancelled') {
+        if (!state.room || state.room.id !== action.room.id) return state;
+        return { ...state, room: action.room };
+      }
+      return { ...state, room: action.room, stage: 'room' };
+    }
+    case 'MATCH_CANCELLED':
+      return { ...state, stage: 'lobby', room: null, round: null, matchResult: null, notice: 'Your match was cancelled and your entry fee was refunded — not everyone readied up in time.' };
     case 'LEAVE_ROOM':
       return { ...state, stage: 'lobby', room: null, round: null, matchResult: null };
     case 'ROUND_REVEAL':
@@ -130,13 +154,16 @@ function reducer(state: ArenaState, action: Action): ArenaState {
       if (!state.round || state.round.roundId !== action.roundId) return state;
       return {
         ...state,
-        round: { ...state.round, resolution: { correct: action.correct, correctToken: action.correctToken, pickedToken: action.pickedToken } },
+        round: {
+          ...state.round,
+          resolution: { correct: action.correct, correctToken: action.correctToken, pickedToken: action.pickedToken, scoreAfter: action.score },
+        },
       };
     case 'ROUND_TIMEOUT':
       if (!state.round || state.round.roundId !== action.timeout.roundId) return state;
       return {
         ...state,
-        round: { ...state.round, resolution: { correct: false, correctToken: action.timeout.correctToken, pickedToken: null } },
+        round: { ...state.round, resolution: { correct: false, correctToken: action.timeout.correctToken, pickedToken: null, scoreAfter: action.timeout.score } },
       };
     case 'MATCH_END':
       return { ...state, stage: 'result', matchResult: action.result, round: null };
@@ -148,6 +175,8 @@ function reducer(state: ArenaState, action: Action): ArenaState {
       return { ...initialState, bootstrapping: false };
     case 'ERROR':
       return { ...state, error: action.error, busy: false };
+    case 'DISMISS_NOTICE':
+      return { ...state, notice: null };
     default:
       return state;
   }
@@ -171,14 +200,12 @@ export function useArena() {
   const [state, dispatch] = useReducer(reducer, initialState);
   const userRef = useRef<ArenaUser | null>(null);
   const roomRef = useRef<RoomStatePublic | null>(null);
-  const roomsRef = useRef<RoomSummary[]>([]);
   const roundRef = useRef<ActiveRoundView | null>(null);
   useEffect(() => {
     userRef.current = state.user;
     roomRef.current = state.room;
-    roomsRef.current = state.rooms;
     roundRef.current = state.round;
-  }, [state.user, state.room, state.rooms, state.round]);
+  }, [state.user, state.room, state.round]);
 
   // --- Bootstrap: ask the server (via the httpOnly session cookie) whether we're already
   // logged in. There is no client-side identity cache anymore — a stored user id/name in
@@ -199,22 +226,30 @@ export function useArena() {
   }, []);
 
   // --- Socket event wiring — only ever connects once we actually have an authenticated
-  // session; the server would reject an unauthenticated socket anyway (see socket.ts). ---
+  // session; the server would reject an unauthenticated socket anyway (see socket.ts).
+  // Connecting (or reconnecting, e.g. after a page refresh or brief network drop) triggers
+  // the server to silently re-attach this socket to whatever match the account was already
+  // authoritatively part of and push a fresh `room:update` — that's what lets a genuine
+  // mid-match reconnect resume seamlessly without the client asking for anything. ---------
   useEffect(() => {
     if (!state.user) return;
     const socket = getArenaSocket();
 
     const onRoomUpdate = (room: RoomStatePublic) => dispatch({ type: 'ROOM_UPDATE', room });
+    const onMatchFound = (room: RoomStatePublic) => dispatch({ type: 'MATCH_FOUND', room });
+    const onMatchCancelled = (payload: { reason: string }) => dispatch({ type: 'MATCH_CANCELLED', reason: payload.reason });
     const onReveal = (reveal: RoundRevealPublic) => dispatch({ type: 'ROUND_REVEAL', reveal });
     const onOptions = (options: RoundOptionsPublic) => dispatch({ type: 'ROUND_OPTIONS', options });
     const onTimeout = (timeout: RoundTimeoutPublic) => dispatch({ type: 'ROUND_TIMEOUT', timeout });
     const onMatchEnd = (result: MatchResultPublic) => {
       dispatch({ type: 'MATCH_END', result });
-      // Wallet balance changed (entry fee + possible payout already applied server-side) — pull the fresh number.
+      // Wallet balance changed (entry fee + possible payout/refund already applied server-side) — pull the fresh number.
       void fetchWallet().then((user) => dispatch({ type: 'WALLET_REFRESHED', user }));
     };
 
     socket.on('room:update', onRoomUpdate);
+    socket.on('match:found', onMatchFound);
+    socket.on('match:cancelled', onMatchCancelled);
     socket.on('match:round:reveal', onReveal);
     socket.on('match:round:options', onOptions);
     socket.on('match:round:timeout', onTimeout);
@@ -222,6 +257,8 @@ export function useArena() {
 
     return () => {
       socket.off('room:update', onRoomUpdate);
+      socket.off('match:found', onMatchFound);
+      socket.off('match:cancelled', onMatchCancelled);
       socket.off('match:round:reveal', onReveal);
       socket.off('match:round:options', onOptions);
       socket.off('match:round:timeout', onTimeout);
@@ -279,41 +316,26 @@ export function useArena() {
   }, []);
 
   /**
-   * Casino-style "pick a stake and play" flow: seats the player at an existing open
-   * table for this entry fee + format if one has room, otherwise opens a fresh table —
-   * the player never has to think about individual room ids or a separate create step.
-   * Neither emit below includes a userId — the server identifies the caller from their
-   * authenticated socket connection alone.
+   * The ONLY way into a match: ask the server's own matchmaking queue for this stake +
+   * format. There is no client-side "look for an open table, else create one" logic
+   * anymore — the client never picks a room id, never decides who it's paired with, and
+   * never learns about a room until the server pushes one back. This is what makes
+   * "join an unauthorized/arbitrary match" structurally impossible rather than merely
+   * checked: there is no room-id parameter left for a client to forge.
    */
-  const playAtFee = useCallback(async (entryFee: number, format: RoomFormat) => {
+  const joinQueue = useCallback(async (entryFee: number, format: RoomFormat) => {
     if (!userRef.current) return;
     dispatch({ type: 'BUSY', busy: true });
-
-    const openTable = roomsRef.current.find(
-      (r) => r.entryFee === entryFee && r.format === format && r.status === 'waiting' && r.playerCount < r.maxPlayers,
-    );
-
-    if (openTable) {
-      const joinAck = await emitAck<{ ok: boolean; room?: RoomStatePublic; error?: string }>('rooms:join', { roomId: openTable.id });
-      if (joinAck.ok && joinAck.room) {
-        dispatch({ type: 'JOIN_ROOM_SUCCESS', room: joinAck.room });
-        return;
-      }
-      // The table filled up (or vanished) between the last poll and this click —
-      // fall through and open a brand new table instead of surfacing an error.
-    }
-
-    const createAck = await emitAck<{ ok: boolean; roomId?: string; error?: string }>('rooms:create', { gameKind: 'memoryMatch', entryFee, format });
-    if (!createAck.ok || !createAck.roomId) {
-      dispatch({ type: 'ERROR', error: createAck.error ?? 'Could not start a table' });
+    const ack = await emitAck<{ ok: boolean; room?: RoomStatePublic; error?: string }>('queue:join', {
+      gameKind: 'memoryMatch',
+      entryFee,
+      format,
+    });
+    if (!ack.ok || !ack.room) {
+      dispatch({ type: 'ERROR', error: ack.error ?? 'Could not join matchmaking' });
       return;
     }
-    const joinAck = await emitAck<{ ok: boolean; room?: RoomStatePublic; error?: string }>('rooms:join', { roomId: createAck.roomId });
-    if (!joinAck.ok || !joinAck.room) {
-      dispatch({ type: 'ERROR', error: joinAck.error ?? 'Could not join the table' });
-      return;
-    }
-    dispatch({ type: 'JOIN_ROOM_SUCCESS', room: joinAck.room });
+    dispatch({ type: 'JOIN_ROOM_SUCCESS', room: ack.room });
   }, []);
 
   const leaveRoom = useCallback(async () => {
@@ -340,19 +362,33 @@ export function useArena() {
     const room = roomRef.current;
     const round = roundRef.current;
     if (!room || !round || round.resolution) return;
-    const ack = await emitAck<{ ok: boolean; correct?: boolean; correctToken?: string; error?: string }>('match:answer', {
+    const ack = await emitAck<{ ok: boolean; correct?: boolean; correctToken?: string; score?: number; error?: string }>('match:answer', {
       roomId: room.id,
       roundId: round.roundId,
       optionToken,
     });
-    if (ack.ok && ack.correct !== undefined && ack.correctToken !== undefined) {
-      dispatch({ type: 'ROUND_ANSWERED', roundId: round.roundId, correct: ack.correct, correctToken: ack.correctToken, pickedToken: optionToken });
+    if (ack.ok && ack.correct !== undefined && ack.correctToken !== undefined && ack.score !== undefined) {
+      dispatch({ type: 'ROUND_ANSWERED', roundId: round.roundId, correct: ack.correct, correctToken: ack.correctToken, pickedToken: optionToken, score: ack.score });
     } else if (!ack.ok && ack.error) {
       // Surfaced so a genuinely confusing rejection (e.g. clock skew) isn't silent — most
       // rejections in normal play are prevented client-side before this point (see
       // RoomScreen's minAnswerAt gating) so this should rarely fire in honest play.
       dispatch({ type: 'ERROR', error: ack.error });
     }
+  }, []);
+
+  /** REMATCH sends a request to the server; the server alone decides whether a rematch can
+   *  be created (only from a match this account just finished) and re-runs the player
+   *  through the exact same matchmaking queue path as any other join — never a
+   *  client-only/locally-fabricated room. */
+  const requestRematch = useCallback(async () => {
+    dispatch({ type: 'BUSY', busy: true });
+    const ack = await emitAck<{ ok: boolean; room?: RoomStatePublic; error?: string }>('match:rematch', {});
+    if (!ack.ok || !ack.room) {
+      dispatch({ type: 'ERROR', error: ack.error ?? 'Could not start a rematch' });
+      return;
+    }
+    dispatch({ type: 'JOIN_ROOM_SUCCESS', room: ack.room });
   }, []);
 
   const backToLobby = useCallback(() => {
@@ -375,6 +411,7 @@ export function useArena() {
   }, []);
 
   const clearError = useCallback(() => dispatch({ type: 'ERROR', error: null }), []);
+  const dismissNotice = useCallback(() => dispatch({ type: 'DISMISS_NOTICE' }), []);
 
   return {
     state,
@@ -383,13 +420,15 @@ export function useArena() {
     refreshRooms,
     topUp,
     withdraw,
-    playAtFee,
+    joinQueue,
     leaveRoom,
     setReady,
     submitAnswer,
+    requestRematch,
     backToLobby,
     goToProfile,
     logout,
     clearError,
+    dismissNotice,
   };
 }

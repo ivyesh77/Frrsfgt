@@ -1,14 +1,16 @@
 import { useMemo } from 'react';
-import { Button } from '../../components/common/Button';
-import { GAME_KIND_LABELS, roomFormatMeta, type ArenaUser, type RoomStatePublic } from '../types';
+import { AnimatePresence, motion } from 'framer-motion';
+import { GAME_KIND_LABELS, initialsOf, roomFormatMeta, type ArenaUser, type RoomStatePublic } from '../types';
 import type { ActiveRoundView } from '../useArena';
 import { useNow } from '../useNow';
+import { Matchmaking } from './Matchmaking';
 import { QuestionRenderer } from './QuestionRenderer';
 
 interface RoomScreenProps {
   user: ArenaUser;
   room: RoomStatePublic;
   round: ActiveRoundView | null;
+  matchFoundToken: number;
   onReady: () => void;
   onLeave: () => void;
   onAnswer: (optionToken: string) => void;
@@ -18,16 +20,22 @@ function formatSeconds(ms: number): string {
   return Math.max(0, Math.ceil(ms / 1000)).toString();
 }
 
-export function RoomScreen({ user, room, round, onReady, onLeave, onAnswer }: RoomScreenProps) {
+export function RoomScreen({ user, room, round, matchFoundToken, onReady, onLeave, onAnswer }: RoomScreenProps) {
   const now = useNow(100);
   const me = room.players.find((p) => p.id === user.id);
-  const isReady = me?.ready ?? false;
   const formatMeta = roomFormatMeta(room.format);
 
-  const leaderboard = useMemo(
-    () => [...room.players].sort((a, b) => b.score - a.score || a.chancesLeft - b.chancesLeft),
-    [room.players],
-  );
+  // "YOU" is always pinned to the top of the live scoreboard regardless of rank — everyone
+  // else is sorted by their own authoritative server score. All numbers here come straight
+  // from room.players (server-pushed on every score change); nothing is computed locally.
+  const scoreboard = useMemo(() => {
+    const others = room.players.filter((p) => p.id !== user.id).sort((a, b) => b.score - a.score);
+    return me ? [me, ...others] : others;
+  }, [room.players, user.id, me]);
+
+  if (room.status !== 'active') {
+    return <Matchmaking user={user} room={room} matchFoundToken={matchFoundToken} onReady={onReady} onLeave={onLeave} />;
+  }
 
   return (
     <div className="arena-room no-select">
@@ -35,81 +43,55 @@ export function RoomScreen({ user, room, round, onReady, onLeave, onAnswer }: Ro
         <div>
           <h1 className="arena-title arena-title--sm">{GAME_KIND_LABELS[room.gameKind]}</h1>
           <p className="arena-subtitle arena-subtitle--sm">
-            {formatMeta.icon} {formatMeta.label} · Entry 🪙 {room.entryFee.toLocaleString()} · Pool 🪙{' '}
-            {room.pool.toLocaleString()}
+            {formatMeta.icon} {formatMeta.label} · Pool 🪙 {room.pool.toLocaleString()}
           </p>
         </div>
-        {room.status === 'waiting' && (
-          <div className="arena-room__actions">
-            <Button variant={isReady ? 'secondary' : 'primary'} size="md" disabled={isReady} onClick={onReady}>
-              {isReady ? 'Ready ✓' : "I'm Ready"}
-            </Button>
-            <Button variant="ghost" size="md" onClick={onLeave}>
-              Leave
-            </Button>
-          </div>
-        )}
-        {room.status === 'countdown' && room.countdownEndsAt && (
-          <div className="arena-countdown-badge">Starting in {formatSeconds(room.countdownEndsAt - now)}s</div>
-        )}
-        {room.status === 'live' && room.matchEndsAt && (
-          <div className="arena-countdown-badge arena-countdown-badge--live">
-            ⏱ {formatSeconds(room.matchEndsAt - now)}s
-          </div>
+        {room.matchEndsAt && (
+          <div className="arena-countdown-badge arena-countdown-badge--live">⏱ {formatSeconds(room.matchEndsAt - now)}s</div>
         )}
       </header>
 
       <div className="arena-room__body">
         <main className="arena-room__main glass-panel">
-          {room.status === 'waiting' && (
-            <div className="arena-waiting">
-              <p className="arena-empty">Waiting for all {formatMeta.players} players to be ready…</p>
-              <p className="arena-fineprint">
-                {room.players.length}/{formatMeta.players} seated · {formatMeta.tagline}
-              </p>
-            </div>
-          )}
-
-          {room.status === 'countdown' && (
-            <div className="arena-waiting">
-              <p className="arena-empty">Get ready! The match is about to begin.</p>
-            </div>
-          )}
-
-          {room.status === 'live' && (
+          {me?.connectionState === 'forfeited' ? (
+            <p className="arena-empty">You forfeited this match — waiting for it to finish for the others…</p>
+          ) : (
             <>
-              {me && me.chancesLeft <= 0 && (
-                <p className="arena-empty">You are out of chances — waiting for the timer to end…</p>
-              )}
-              {me && me.chancesLeft > 0 && !round && <p className="arena-empty">Loading next round…</p>}
-              {me && me.chancesLeft > 0 && round && <QuestionRenderer round={round} now={now} onAnswer={onAnswer} />}
+              {!round && <p className="arena-empty">Loading next round…</p>}
+              {round && <QuestionRenderer round={round} now={now} onAnswer={onAnswer} />}
             </>
-          )}
-
-          {room.status === 'live' && me && (
-            <div className="arena-self-stats">
-              <span>Score: {me.score}</span>
-              <span>Chances: {'❤️'.repeat(me.chancesLeft) || '—'}</span>
-            </div>
           )}
         </main>
 
         <aside className="arena-leaderboard glass-panel">
-          <h2 className="arena-section__title">Players</h2>
+          <h2 className="arena-section__title">{room.format === 'duel' ? 'Scoreboard' : 'Live Standings'}</h2>
           <ul>
-            {leaderboard.map((p, i) => (
-              <li key={p.id} className={p.id === user.id ? 'arena-leaderboard__self' : ''}>
-                <span className="arena-leaderboard__rank">{i + 1}</span>
-                <span className="arena-leaderboard__name">
-                  {p.name}
-                  {!p.connected && ' (left)'}
-                </span>
-                <span className="arena-leaderboard__score">{p.score}</span>
-                {room.status === 'waiting' && (
-                  <span className="arena-leaderboard__ready">{p.ready ? '✓' : '…'}</span>
-                )}
-              </li>
-            ))}
+            {scoreboard.map((p) => {
+              const isSelf = p.id === user.id;
+              return (
+                <li key={p.id} className={isSelf ? 'arena-leaderboard__self' : ''}>
+                  <span className="arena-leaderboard__avatar" aria-hidden="true">
+                    {initialsOf(p.name)}
+                  </span>
+                  <span className="arena-leaderboard__name">
+                    {isSelf ? 'You' : p.name}
+                    {p.connectionState === 'disconnected' && ' · reconnecting…'}
+                    {p.connectionState === 'forfeited' && ' · forfeited'}
+                  </span>
+                  <AnimatePresence mode="popLayout">
+                    <motion.span
+                      key={p.score}
+                      className={`arena-leaderboard__score ${p.score < 0 ? 'arena-leaderboard__score--neg' : ''}`}
+                      initial={{ y: -8, opacity: 0 }}
+                      animate={{ y: 0, opacity: 1 }}
+                      transition={{ duration: 0.2 }}
+                    >
+                      {p.score}
+                    </motion.span>
+                  </AnimatePresence>
+                </li>
+              );
+            })}
           </ul>
         </aside>
       </div>

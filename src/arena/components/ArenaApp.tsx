@@ -37,6 +37,14 @@ export function ArenaApp() {
           </button>
         </div>
       )}
+      {!state.error && state.notice && (
+        <div className="arena-toast arena-toast--notice" role="status">
+          <span>{state.notice}</span>
+          <button type="button" onClick={arena.dismissNotice} aria-label="Dismiss">
+            ✕
+          </button>
+        </div>
+      )}
 
       {state.stage === 'login' && <Home busy={state.authenticating} onLogin={arena.login} onSignup={arena.signup} />}
 
@@ -45,7 +53,7 @@ export function ArenaApp() {
           user={state.user}
           rooms={state.rooms}
           busy={state.busy}
-          onPlay={arena.playAtFee}
+          onPlay={arena.joinQueue}
           onTopUp={arena.topUp}
           onWithdraw={arena.withdraw}
           onProfile={arena.goToProfile}
@@ -67,6 +75,7 @@ export function ArenaApp() {
           user={state.user}
           room={state.room}
           round={state.round}
+          matchFoundToken={state.matchFoundToken}
           onReady={arena.setReady}
           onLeave={arena.leaveRoom}
           onAnswer={arena.submitAnswer}
@@ -74,7 +83,13 @@ export function ArenaApp() {
       )}
 
       {state.stage === 'result' && state.matchResult && state.user && (
-        <MatchResult result={state.matchResult} user={state.user} onBackToLobby={arena.backToLobby} />
+        <MatchResult
+          result={state.matchResult}
+          user={state.user}
+          busy={state.busy}
+          onBackToLobby={arena.backToLobby}
+          onRematch={arena.requestRematch}
+        />
       )}
     </div>
   );

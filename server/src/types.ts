@@ -15,7 +15,7 @@ export type EntryFee = (typeof ENTRY_FEE_TIERS)[number];
 // Read lazily (not baked into a module-level const) so the self-test suite
 // can shorten match/countdown durations via env vars regardless of ESM
 // module-evaluation order; production simply never sets these env vars and
-// always gets the real 60s/5s defaults.
+// always gets the real defaults below.
 export function getMatchDurationMs(): number {
   return Number(process.env.ARCADE_MATCH_DURATION_MS) || 60_000;
 }
@@ -28,7 +28,16 @@ export function getRoundMemorizeMs(): number {
 export function getRoundAnswerMs(): number {
   return Number(process.env.ARCADE_ROUND_ANSWER_MS) || 4_200;
 }
-export const STARTING_CHANCES = 5;
+/** How long a full lobby waits for every seated player to ready up before the server
+ *  cancels the match and refunds everyone (see rooms.ts `startReadyCheck`). */
+export function getLobbyReadyTimeoutMs(): number {
+  return Number(process.env.ARCADE_LOBBY_READY_TIMEOUT_MS) || 45_000;
+}
+/** How long a disconnected player's seat is held (rounds paused, not force-advanced) before
+ *  the server treats them as having forfeited the match (see rooms.ts `handleDisconnect`). */
+export function getReconnectGraceMs(): number {
+  return Number(process.env.ARCADE_RECONNECT_GRACE_MS) || 20_000;
+}
 
 /** The minimum time a real, honest client can possibly take to notice the options and tap
  *  one — anything faster than this is physically implausible for a human and is rejected
@@ -39,9 +48,9 @@ export const STARTING_CHANCES = 5;
 export const MIN_REACTION_MS = 150;
 
 // Every room is one of two fixed formats that only start once completely full:
-// a 1v1 duel (winner takes the entire winner pool, loser gets nothing) or a
-// 4-player squad match (top 2 scorers split the winner pool, bottom 2 win
-// nothing). See FIRST_PLACE_SHARE below for the squad 1st/2nd split.
+// a 1v1 duel or a 1v1v1v1 (4-player) squad. Both share the exact same core gameplay
+// (one center target, four corner options, +1/-1 scoring, one overall match timer) — the
+// only difference is player count and how the final standings are presented/paid out.
 export type RoomFormat = 'duel' | 'squad';
 
 export interface RoomFormatMeta {
@@ -55,7 +64,7 @@ export interface RoomFormatMeta {
 
 export const ROOM_FORMATS: RoomFormatMeta[] = [
   { id: 'duel', label: '1v1 Duel', players: 2, winnerCount: 1 },
-  { id: 'squad', label: '4-Player Squad', players: 4, winnerCount: 2 },
+  { id: 'squad', label: '1v1v1v1 Squad', players: 4, winnerCount: 2 },
 ];
 
 export function roomFormatMeta(format: RoomFormat): RoomFormatMeta {
@@ -70,7 +79,7 @@ export const PLATFORM_FEE_RATE = 0.2; // 20% platform cut, 80% to the winners
 // Squad-format only: of the winner pool (winnerPayoutTotal), 1st place takes this
 // share and 2nd place takes the remainder — e.g. 60/40. If only one player actually
 // scored, they take the entire winner pool alone instead of splitting with a
-// non-scoring "2nd place". Duels never split — the sole scorer takes it all.
+// non-scoring "2nd place". Duels never split — the sole winner takes it all.
 export const FIRST_PLACE_SHARE = 0.6;
 export const STARTING_WALLET_BALANCE = 1000;
 
@@ -190,14 +199,40 @@ export interface RoundOptionsPublic {
   options: RoundOptionPublic[];
 }
 
-export interface RoundTimeoutPublic {
+export interface RoundResultPublic {
   roundId: string;
-  /** Safe to reveal now — the round is already over and the token was freshly random for
-   *  this round only, so revealing it teaches an attacker nothing about future rounds. */
+  correct: boolean;
+  /** Safe to reveal now — the round is already over and the token was single-use/random
+   *  for this round only, so revealing it teaches an attacker nothing about future rounds. */
   correctToken: string;
+  /** The caller's own new authoritative score, included purely so the client never has to
+   *  (and never gets to) compute it locally — this is the server's number, not a delta the
+   *  client applied itself. */
+  score: number;
 }
 
-export type RoomStatus = 'waiting' | 'countdown' | 'live' | 'finished';
+export interface RoundTimeoutPublic {
+  roundId: string;
+  correctToken: string;
+  score: number;
+}
+
+// ---------------------------------------------------------------------------
+// Matchmaking / room lifecycle. Explicit, narrow state machine — see rooms.ts for the
+// guarded transition functions. A player-facing summary of "which stage am I at" is
+// reconstructed by the client purely from this status plus the fields below; the client
+// never invents or advances this state on its own.
+//
+//   queued      -> room created, still waiting for enough players (server-side matchmaking
+//                  queue; the player did not choose an opponent or room id).
+//   ready_check -> room is full; every occupant must send `rooms:ready` before a short
+//                  server-owned timeout elapses, or the match is cancelled (refunded).
+//   starting    -> everyone readied up; a server-owned 3-2-1-GO countdown is running.
+//   active      -> the single overall match timer is running; rounds are being dispatched.
+//   finished    -> the match timer elapsed (or every player forfeited) and results are final.
+//   cancelled   -> the ready-check timed out before everyone readied; entry fees refunded.
+// ---------------------------------------------------------------------------
+export type RoomStatus = 'queued' | 'ready_check' | 'starting' | 'active' | 'finished' | 'cancelled';
 
 /** One player's currently in-flight round, tracked server-side only. */
 export interface ActiveRound {
@@ -213,6 +248,13 @@ export interface ActiveRound {
   expireTimer: NodeJS.Timeout | null;
 }
 
+/** Mirrors real-world connection reality for a seated player. `disconnected` covers both
+ *  "just dropped" and "actively trying to reconnect" — the client is expected to render
+ *  both the same way ("reconnecting…") since the server doesn't need a distinct third wire
+ *  state to make the right authoritative decision (see rooms.ts `handleDisconnect` /
+ *  `getReconnectGraceMs`). `forfeited` is terminal for that player for the rest of the match. */
+export type PlayerConnectionState = 'connected' | 'disconnected' | 'forfeited';
+
 export interface RoomPlayer {
   userId: string;
   /** Random per-room-join id shown to every OTHER occupant instead of the real account id
@@ -222,13 +264,18 @@ export interface RoomPlayer {
   name: string;
   socketId: string;
   ready: boolean;
+  /** Authoritative score: +1 per correct answer, -1 per wrong answer or timeout. Can go
+   *  negative — there is no "elimination" mechanic; every seated player keeps playing
+   *  every round until the single overall match timer ends. */
   score: number;
-  chancesLeft: number;
   correct: number;
   wrong: number;
   lastAnswerAt: number | null;
-  connected: boolean;
+  connectionState: PlayerConnectionState;
   activeRound: ActiveRound | null;
+  /** Server-owned grace timer started the instant this player disconnects mid-match; if it
+   *  fires before they reconnect, they are marked `forfeited`. Never exposed to any client. */
+  forfeitTimer: NodeJS.Timeout | null;
 }
 
 export interface RoomPlayerPublic {
@@ -238,8 +285,7 @@ export interface RoomPlayerPublic {
   name: string;
   ready: boolean;
   score: number;
-  chancesLeft: number;
-  connected: boolean;
+  connectionState: PlayerConnectionState;
 }
 
 export interface RoomSummary {
@@ -260,7 +306,11 @@ export interface RoomStatePublic {
   status: RoomStatus;
   pool: number;
   players: RoomPlayerPublic[];
-  countdownEndsAt: number | null;
+  /** Set once `status` becomes `ready_check` — the server-owned deadline by which every
+   *  occupant must have readied up, or the match is cancelled. */
+  readyDeadline: number | null;
+  /** Set once `status` becomes `starting` — the server-owned 3-2-1-GO countdown target. */
+  startsAt: number | null;
   matchEndsAt: number | null;
 }
 
@@ -273,6 +323,7 @@ export interface MatchResultPlayer {
   wrong: number;
   payout: number;
   isWinner: boolean;
+  connectionState: PlayerConnectionState;
 }
 
 export interface MatchResultPublic {
@@ -283,7 +334,16 @@ export interface MatchResultPublic {
   pool: number;
   platformCut: number;
   winnerPayoutTotal: number;
-  /** True when nobody scored a single point — every entry fee was refunded, no platform cut taken. */
+  /** True only when literally nobody in the match ever submitted a single answer (e.g.
+   *  everyone disconnected immediately) — every entry fee is refunded, no platform cut taken. */
   isVoidMatch: boolean;
+  /** Duel-only: true when both players finished with the exact same score — no winner is
+   *  paid out, both entry fees are refunded (see payout.ts). Always false for squad matches,
+   *  which always produce a strict 1st-4th ranking even when scores tie. */
+  isDraw: boolean;
+  /** Why the match ended — `timer` is the normal case; `forfeit` means every remaining
+   *  opponent forfeited (disconnected past the reconnect grace window) before the timer
+   *  elapsed, most relevant for a duel where one forfeit immediately decides the match. */
+  endedBy: 'timer' | 'forfeit';
   results: MatchResultPlayer[];
 }

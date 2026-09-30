@@ -88,7 +88,24 @@ export interface ArenaUser {
   createdAt: number;
 }
 
-export type RoomStatus = 'waiting' | 'countdown' | 'live' | 'finished';
+/**
+ * Server-authoritative match/lobby lifecycle (mirrors server/src/types.ts RoomStatus):
+ *   queued      -> in the server-side matchmaking queue, waiting for enough players.
+ *   ready_check -> the room is full; every occupant must send `rooms:ready` before a
+ *                  server-owned deadline (`readyDeadline`), or the match is cancelled.
+ *   starting    -> everyone readied up; a server-owned 3-2-1-GO countdown is running
+ *                  (`startsAt`).
+ *   active      -> the single overall match timer (`matchEndsAt`) is running.
+ *   finished    -> the match is over; final results are in `match:end`.
+ *   cancelled   -> the ready-check timed out before everyone readied; entry fees refunded.
+ * The client only ever *renders* this — it never decides or advances it.
+ */
+export type RoomStatus = 'queued' | 'ready_check' | 'starting' | 'active' | 'finished' | 'cancelled';
+
+/** Mirrors server/src/types.ts. `disconnected` covers both "just dropped" and "trying to
+ *  reconnect" — rendered identically ("reconnecting…") since the server doesn't expose a
+ *  separate wire state for that distinction. `forfeited` is terminal for that seat. */
+export type PlayerConnectionState = 'connected' | 'disconnected' | 'forfeited';
 
 /** `id` is the viewer's OWN real account id if this entry is them, otherwise a room-scoped
  *  opaque id — the server never reveals another occupant's real account id (see
@@ -99,8 +116,7 @@ export interface RoomPlayerPublic {
   name: string;
   ready: boolean;
   score: number;
-  chancesLeft: number;
-  connected: boolean;
+  connectionState: PlayerConnectionState;
 }
 
 export interface RoomSummary {
@@ -121,7 +137,8 @@ export interface RoomStatePublic {
   status: RoomStatus;
   pool: number;
   players: RoomPlayerPublic[];
-  countdownEndsAt: number | null;
+  readyDeadline: number | null;
+  startsAt: number | null;
   matchEndsAt: number | null;
 }
 
@@ -134,6 +151,7 @@ export interface MatchResultPlayer {
   wrong: number;
   payout: number;
   isWinner: boolean;
+  connectionState: PlayerConnectionState;
 }
 
 export interface MatchResultPublic {
@@ -145,6 +163,9 @@ export interface MatchResultPublic {
   platformCut: number;
   winnerPayoutTotal: number;
   isVoidMatch: boolean;
+  /** Duel-only: both players finished with an identical score — no winner, full refund. */
+  isDraw: boolean;
+  endedBy: 'timer' | 'forfeit';
   results: MatchResultPlayer[];
 }
 
@@ -189,6 +210,15 @@ export interface RoundOptionsPublic {
 export interface RoundTimeoutPublic {
   roundId: string;
   correctToken: string;
+  /** The caller's own new authoritative score after this timeout's -1 penalty — the server's
+   *  number, never something the client computes itself. */
+  score: number;
+}
+
+export interface RoundResultPublic {
+  correct: boolean;
+  correctToken: string;
+  score: number;
 }
 
 // --- Wallet ledger --------------------------------------------------------

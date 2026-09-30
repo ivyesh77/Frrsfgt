@@ -138,11 +138,15 @@ function FormatSection({ format, rooms, user, busy, onPlay }: FormatSectionProps
 
       <ul className="arena-table-grid">
         {ENTRY_FEE_TIERS.map((fee) => {
+          // Purely cosmetic — "how full does a queue for this stake currently look". The
+          // player never picks or targets this specific room: clicking Play always asks the
+          // server's own matchmaking queue to place them, which may seat them here, on a
+          // different still-filling queue, or on a brand new one — the server decides.
           const openTable = rooms.find(
-            (r) => r.entryFee === fee && r.format === format.id && r.status === 'waiting' && r.playerCount < r.maxPlayers,
+            (r) => r.entryFee === fee && r.format === format.id && r.status === 'queued' && r.playerCount < r.maxPlayers,
           );
           const liveTablesCount = rooms.filter(
-            (r) => r.entryFee === fee && r.format === format.id && r.status !== 'waiting' && r.status !== 'finished',
+            (r) => r.entryFee === fee && r.format === format.id && r.status !== 'queued',
           ).length;
           const seated = openTable?.playerCount ?? 0;
           const affordable = user.walletBalance >= fee;
@@ -178,7 +182,7 @@ function FormatSection({ format, rooms, user, busy, onPlay }: FormatSectionProps
                 disabled={!affordable || busy}
                 onClick={() => onPlay(fee, format.id)}
               >
-                {seated > 0 ? `Join table (${seated}/${format.players})` : 'Play'}
+                {seated > 0 ? `Join matchmaking (${seated}/${format.players})` : 'Find Match'}
               </Button>
               {!affordable && <p className="arena-fineprint arena-fineprint--warn">Deposit more ArenaCoin to play this table.</p>}
             </motion.li>

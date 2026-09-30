@@ -11,12 +11,14 @@ import {
   getReadyCountdownMs,
   getRoundMemorizeMs,
   getRoundAnswerMs,
+  getLobbyReadyTimeoutMs,
+  getReconnectGraceMs,
   MIN_REACTION_MS,
-  STARTING_CHANCES,
   type ActiveRound,
   type GameKind,
   type MatchResultPlayer,
   type MatchResultPublic,
+  type PlayerConnectionState,
   type RoomFormat,
   type RoomPlayer,
   type RoomPlayerPublic,
@@ -41,10 +43,11 @@ class Room {
   maxPlayers: number;
   winnerCount: number;
   entryFee: number;
-  status: RoomStatus = 'waiting';
+  status: RoomStatus = 'queued';
   players = new Map<string, RoomPlayer>();
   pool = 0;
-  countdownEndsAt: number | null = null;
+  readyDeadline: number | null = null;
+  startsAt: number | null = null;
   matchEndsAt: number | null = null;
   timers: NodeJS.Timeout[] = [];
 
@@ -60,29 +63,32 @@ class Room {
   clearTimers() {
     this.timers.forEach(clearTimeout);
     this.timers = [];
-    for (const player of this.players.values()) clearPlayerRoundTimers(player);
+    for (const player of this.players.values()) clearPlayerTimers(player);
   }
 }
 
-function clearPlayerRoundTimers(player: RoomPlayer): void {
-  if (!player.activeRound) return;
-  if (player.activeRound.advanceTimer) clearTimeout(player.activeRound.advanceTimer);
-  if (player.activeRound.expireTimer) clearTimeout(player.activeRound.expireTimer);
+function clearPlayerTimers(player: RoomPlayer): void {
+  if (player.activeRound) {
+    if (player.activeRound.advanceTimer) clearTimeout(player.activeRound.advanceTimer);
+    if (player.activeRound.expireTimer) clearTimeout(player.activeRound.expireTimer);
+  }
+  if (player.forfeitTimer) clearTimeout(player.forfeitTimer);
 }
 
 /** `viewerUserId` is whichever socket this payload is being sent to — every OTHER
  *  occupant's real account id is replaced with their room-scoped opaque `publicId`, so a
  *  player can never learn another player's actual account id just by sharing a room with
  *  them (see AUDIT_REPORT.md — this was a live, verified wallet-drain vector). The
- *  viewer's own entry keeps its real id so the client can tell which seat is "me". */
+ *  viewer's own entry keeps its real id so the client can tell which seat is "me". Only
+ *  public gameplay fields are ever included — no socket id, no email, no wallet balance,
+ *  no internal DB shape. */
 function toPlayerPublic(p: RoomPlayer, viewerUserId: string): RoomPlayerPublic {
   return {
     id: p.userId === viewerUserId ? p.userId : p.publicId,
     name: p.name,
     ready: p.ready,
     score: p.score,
-    chancesLeft: p.chancesLeft,
-    connected: p.connected,
+    connectionState: p.connectionState,
   };
 }
 
@@ -95,19 +101,30 @@ function toRoomPublic(room: Room, viewerUserId: string): RoomStatePublic {
     status: room.status,
     pool: room.pool,
     players: [...room.players.values()].map((p) => toPlayerPublic(p, viewerUserId)),
-    countdownEndsAt: room.countdownEndsAt,
+    readyDeadline: room.readyDeadline,
+    startsAt: room.startsAt,
     matchEndsAt: room.matchEndsAt,
   };
 }
 
 export class RoomManager {
   private rooms = new Map<string, Room>();
+  /** One open (still-filling) room per `gameKind:format:entryFee` key — this IS the server
+   *  side matchmaking queue. A client never picks a room id; it only ever asks to join the
+   *  queue for a mode, and the server alone decides which room (existing-and-open, or a
+   *  freshly created one) that seats them into. */
+  private openQueues = new Map<string, Room>();
+  /** The one room each user is currently associated with (queued, in a lobby, or actively
+   *  playing) — used to reject "already in a match" double-joins, to silently resume a
+   *  dropped connection on socket reconnect without the client re-selecting anything, and
+   *  to know what to re-queue for on a rematch request. */
+  private activeRoomByUser = new Map<string, string>();
 
   constructor(private io: Server) {}
 
   listRooms(gameKind?: GameKind): RoomSummary[] {
     return [...this.rooms.values()]
-      .filter((r) => r.status !== 'finished' && (!gameKind || r.gameKind === gameKind))
+      .filter((r) => r.status !== 'finished' && r.status !== 'cancelled' && (!gameKind || r.gameKind === gameKind))
       .map((r) => ({
         id: r.id,
         gameKind: r.gameKind,
@@ -119,41 +136,48 @@ export class RoomManager {
       }));
   }
 
-  getRoomPublic(roomId: string, viewerUserId: string): RoomStatePublic | null {
+  private hasLiveAssignment(userId: string): boolean {
+    const roomId = this.activeRoomByUser.get(userId);
+    if (!roomId) return false;
     const room = this.rooms.get(roomId);
-    return room ? toRoomPublic(room, viewerUserId) : null;
-  }
-
-  createRoom(gameKind: GameKind, entryFee: number, format: RoomFormat): Room {
-    const room = new Room(gameKind, entryFee, format);
-    this.rooms.set(room.id, room);
-    return room;
+    if (!room) {
+      this.activeRoomByUser.delete(userId);
+      return false;
+    }
+    return room.status !== 'finished' && room.status !== 'cancelled';
   }
 
   private broadcastRoom(room: Room) {
     for (const player of room.players.values()) {
-      if (!player.connected) continue;
+      if (player.connectionState === 'forfeited') continue;
       this.io.to(player.socketId).emit('room:update', toRoomPublic(room, player.userId));
     }
   }
 
-  /** Debits the entry fee and seats the player. Throws on invalid state or insufficient
-   *  funds. `user` must already be the session-authenticated caller — see index.ts, which
-   *  is the only place allowed to resolve a `User` from a request and it always does so
-   *  from the authenticated session, never from a client-supplied id. */
-  joinRoom(roomId: string, user: User, socketId: string): Room {
-    const room = this.rooms.get(roomId);
-    if (!room) throw new Error('Room not found');
-    if (room.status !== 'waiting') throw new Error('Room already started');
-    if (room.players.has(user.id)) {
-      // Reconnect case: just refresh the socket id.
-      const existing = room.players.get(user.id)!;
-      existing.socketId = socketId;
-      existing.connected = true;
-      this.broadcastRoom(room);
-      return room;
+  private queueKey(gameKind: GameKind, format: RoomFormat, entryFee: number): string {
+    return `${gameKind}:${format}:${entryFee}`;
+  }
+
+  /**
+   * The ONLY way a client can enter a match. There is no client-facing "join this specific
+   * room id" call anymore — the server alone decides whether an existing open room (for
+   * this exact gameKind+format+entryFee) is reused or a fresh one is created, and which
+   * seat the player lands in. This is what makes "joining an unauthorized match" structurally
+   * impossible rather than merely checked: there is no room-id parameter for a client to
+   * forge in the first place.
+   */
+  queueJoin(gameKind: GameKind, entryFee: number, format: RoomFormat, user: User, socketId: string): Room {
+    if (this.hasLiveAssignment(user.id)) {
+      throw new Error('You are already queued or in a match — leave it before joining another');
     }
-    if (room.players.size >= room.maxPlayers) throw new Error('Room is full');
+
+    const key = this.queueKey(gameKind, format, entryFee);
+    let room = this.openQueues.get(key) ?? null;
+    if (!room) {
+      room = new Room(gameKind, entryFee, format);
+      this.rooms.set(room.id, room);
+      this.openQueues.set(key, room);
+    }
 
     debitEntryFee(user.id, room.entryFee, room.id); // throws InsufficientFundsError if short
     room.pool += room.entryFee;
@@ -165,16 +189,78 @@ export class RoomManager {
       socketId,
       ready: false,
       score: 0,
-      chancesLeft: STARTING_CHANCES,
       correct: 0,
       wrong: 0,
       lastAnswerAt: null,
-      connected: true,
+      connectionState: 'connected',
       activeRound: null,
+      forfeitTimer: null,
     };
     room.players.set(user.id, player);
+    this.activeRoomByUser.set(user.id, room.id);
+
+    if (room.players.size >= room.maxPlayers) {
+      this.openQueues.delete(key);
+      this.enterReadyCheck(room);
+    } else {
+      this.broadcastRoom(room);
+    }
+    return room;
+  }
+
+  getRoomPublic(roomId: string, viewerUserId: string): RoomStatePublic | null {
+    const room = this.rooms.get(roomId);
+    return room ? toRoomPublic(room, viewerUserId) : null;
+  }
+
+  /** Called once per socket the instant it (re)connects, authenticated. If this user has a
+   *  live (or just-finished) room association, re-attaches this new socket to it and — if
+   *  they were mid-match and had dropped — cancels their forfeit grace timer and resumes
+   *  dispatching rounds to them. Returns the room they were resumed into, or null if they
+   *  have no room to resume (a perfectly normal case — most connects are a fresh session). */
+  reconnect(userId: string, socketId: string): Room | null {
+    const roomId = this.activeRoomByUser.get(userId);
+    if (!roomId) return null;
+    const room = this.rooms.get(roomId);
+    const player = room?.players.get(userId);
+    if (!room || !player) {
+      this.activeRoomByUser.delete(userId);
+      return null;
+    }
+
+    player.socketId = socketId;
+    if (room.status === 'finished' || room.status === 'cancelled') {
+      // Let a refresh right after match-end still read the final result once, without
+      // reinstating any gameplay privileges (there is nothing left to resume).
+      this.io.to(socketId).emit('room:update', toRoomPublic(room, userId));
+      return room;
+    }
+
+    if (player.connectionState !== 'forfeited') {
+      if (player.forfeitTimer) {
+        clearTimeout(player.forfeitTimer);
+        player.forfeitTimer = null;
+      }
+      player.connectionState = 'connected';
+      if (room.status === 'active' && !player.activeRound) this.startRound(room, player);
+    }
     this.broadcastRoom(room);
     return room;
+  }
+
+  /** Explicit "REMATCH" request — never creates a client-only room. The server looks up the
+   *  finished/cancelled match this user was just in and, if found, runs them back through
+   *  the exact same server matchmaking path (`queueJoin`) for the same game/format/stake.
+   *  It is not guaranteed to reunite the same opponent(s) — this product has no persistent
+   *  "invite a specific player" system — but the room/opponent assignment is, as with any
+   *  other join, decided entirely server-side. */
+  rematch(user: User, socketId: string): Room {
+    const lastRoomId = this.activeRoomByUser.get(user.id);
+    const lastRoom = lastRoomId ? this.rooms.get(lastRoomId) : undefined;
+    if (!lastRoom || (lastRoom.status !== 'finished' && lastRoom.status !== 'cancelled')) {
+      throw new Error('No finished match to rematch');
+    }
+    return this.queueJoin(lastRoom.gameKind, lastRoom.entryFee, lastRoom.format, user, socketId);
   }
 
   /** Every mutating call below takes `userId` as a value the caller (index.ts) has already
@@ -188,57 +274,145 @@ export class RoomManager {
     const player = room.players.get(userId);
     if (!player) return;
 
-    if (room.status === 'waiting' || room.status === 'countdown') {
+    if (room.status === 'queued') {
       refundEntryFee(userId, room.entryFee, room.id);
       room.pool -= room.entryFee;
       room.players.delete(userId);
-      if (room.status === 'countdown' && room.players.size < room.maxPlayers) {
-        room.status = 'waiting';
-        room.countdownEndsAt = null;
-        room.clearTimers();
+      this.activeRoomByUser.delete(userId);
+      this.broadcastRoom(room);
+      if (room.players.size === 0) {
+        const key = this.queueKey(room.gameKind, room.format, room.entryFee);
+        if (this.openQueues.get(key) === room) this.openQueues.delete(key);
+        this.rooms.delete(room.id);
       }
-      this.broadcastRoom(room);
-      if (room.players.size === 0) this.rooms.delete(room.id);
-    } else if (room.status === 'live') {
-      // No refund once the match is live — mark disconnected, keep their score standing.
-      clearPlayerRoundTimers(player);
-      player.connected = false;
-      this.broadcastRoom(room);
+    } else if (room.status === 'ready_check' || room.status === 'starting' || room.status === 'active') {
+      // A voluntary quit mid-lobby-or-match is treated exactly like an unexpected
+      // disconnect: no refund, a grace window in case it was a mistake, then a real
+      // forfeit — never an instant, consequence-free bail-out.
+      this.markDisconnected(room, player);
     }
   }
 
+  /** Fired by index.ts's `disconnect` handler. Distinguishes "this socket dropped" from
+   *  "this player already reconnected on a new socket and the old one is just cleaning up"
+   *  by checking the socket id actually still matches the player's current one. */
   handleDisconnect(roomId: string, userId: string, socketId: string) {
     const room = this.rooms.get(roomId);
     const player = room?.players.get(userId);
     if (!room || !player || player.socketId !== socketId) return;
-    this.leaveRoom(roomId, userId);
+
+    if (room.status === 'queued') {
+      this.leaveRoom(roomId, userId);
+      return;
+    }
+    if (room.status === 'ready_check' || room.status === 'starting' || room.status === 'active') {
+      this.markDisconnected(room, player);
+    }
+  }
+
+  private markDisconnected(room: Room, player: RoomPlayer) {
+    if (player.connectionState === 'forfeited') return;
+    if (player.activeRound) {
+      // Freeze — don't keep dispatching rounds to a seat nobody's watching, and don't let
+      // a stale round from before the drop be answered by whatever reconnects later.
+      if (player.activeRound.advanceTimer) clearTimeout(player.activeRound.advanceTimer);
+      if (player.activeRound.expireTimer) clearTimeout(player.activeRound.expireTimer);
+      player.activeRound = null;
+    }
+    player.connectionState = 'disconnected';
+    this.broadcastRoom(room);
+
+    const graceMs = getReconnectGraceMs();
+    player.forfeitTimer = setTimeout(() => this.forfeitPlayer(room, player), graceMs);
+  }
+
+  private forfeitPlayer(room: Room, player: RoomPlayer) {
+    if (player.connectionState !== 'disconnected') return; // already reconnected in the meantime
+    player.connectionState = 'forfeited';
+    player.forfeitTimer = null;
+    this.broadcastRoom(room);
+
+    if (room.status === 'ready_check' || room.status === 'starting') {
+      // Can't run a valid duel/squad short a seat, and this product doesn't backfill a
+      // half-started lobby — cancel cleanly and refund everyone rather than leave the
+      // remaining players stuck waiting on a seat that is never coming back.
+      this.cancelRoom(room);
+      return;
+    }
+    if (room.status === 'active') {
+      const stillIn = [...room.players.values()].filter((p) => p.connectionState !== 'forfeited');
+      if (room.format === 'duel' && stillIn.length <= 1) {
+        this.endMatch(room, 'forfeit');
+      } else if (stillIn.length === 0) {
+        this.endMatch(room, 'forfeit');
+      }
+    }
+  }
+
+  /** Refunds every still-seated player and tears the room down without ever attempting to
+   *  pick a winner — used for both a ready-check timeout and a pre-start forfeit, i.e. any
+   *  case where a full match could never legitimately be played out. */
+  private cancelRoom(room: Room, reason: 'ready_timeout' | 'forfeit' = 'ready_timeout') {
+    if (room.status === 'finished' || room.status === 'cancelled') return;
+    room.status = 'cancelled';
+    room.clearTimers();
+
+    const key = this.queueKey(room.gameKind, room.format, room.entryFee);
+    if (this.openQueues.get(key) === room) this.openQueues.delete(key);
+
+    for (const player of room.players.values()) {
+      if (player.connectionState !== 'forfeited') refundEntryFee(player.userId, room.entryFee, room.id);
+      this.io.to(player.socketId).emit('match:cancelled', { roomId: room.id, reason });
+      this.io.to(player.socketId).emit('room:update', toRoomPublic(room, player.userId));
+    }
+
+    setTimeout(() => {
+      for (const p of room.players.values()) {
+        if (this.activeRoomByUser.get(p.userId) === room.id) this.activeRoomByUser.delete(p.userId);
+      }
+      this.rooms.delete(room.id);
+    }, 10_000);
+  }
+
+  private enterReadyCheck(room: Room) {
+    room.status = 'ready_check';
+    const timeoutMs = getLobbyReadyTimeoutMs();
+    room.readyDeadline = Date.now() + timeoutMs;
+    for (const player of room.players.values()) {
+      this.io.to(player.socketId).emit('match:found', toRoomPublic(room, player.userId));
+    }
+    this.broadcastRoom(room);
+    const timer = setTimeout(() => {
+      if (room.status === 'ready_check') this.cancelRoom(room, 'ready_timeout');
+    }, timeoutMs);
+    room.timers.push(timer);
   }
 
   setReady(roomId: string, userId: string) {
     const room = this.rooms.get(roomId);
-    if (!room || room.status !== 'waiting') return;
+    if (!room || room.status !== 'ready_check') return;
     const player = room.players.get(userId);
-    if (!player) return;
+    if (!player || player.connectionState !== 'connected') return;
     player.ready = true;
     this.broadcastRoom(room);
 
-    const readyCount = [...room.players.values()].filter((p) => p.ready).length;
-    if (readyCount >= room.maxPlayers && readyCount === room.players.size) {
-      this.startCountdown(room);
-    }
+    const active = [...room.players.values()].filter((p) => p.connectionState !== 'forfeited');
+    const allReady = active.length === room.maxPlayers && active.every((p) => p.ready);
+    if (allReady) this.startCountdown(room);
   }
 
   private startCountdown(room: Room) {
-    room.status = 'countdown';
+    room.clearTimers(); // cancel the ready-check timeout — everyone is in, no need for it
+    room.status = 'starting';
     const readyCountdownMs = getReadyCountdownMs();
-    room.countdownEndsAt = Date.now() + readyCountdownMs;
+    room.startsAt = Date.now() + readyCountdownMs;
     this.broadcastRoom(room);
     const timer = setTimeout(() => this.startMatch(room), readyCountdownMs);
     room.timers.push(timer);
   }
 
   private startMatch(room: Room) {
-    room.status = 'live';
+    room.status = 'active';
     const matchDurationMs = getMatchDurationMs();
     room.matchEndsAt = Date.now() + matchDurationMs;
     this.broadcastRoom(room);
@@ -247,7 +421,7 @@ export class RoomManager {
       this.startRound(room, player);
     }
 
-    const timer = setTimeout(() => this.endMatch(room), matchDurationMs);
+    const timer = setTimeout(() => this.endMatch(room, 'timer'), matchDurationMs);
     room.timers.push(timer);
   }
 
@@ -264,13 +438,15 @@ export class RoomManager {
    *      unrelated-to-its-asset `token`) plus an authoritative `answerDeadline` and
    *      `minAnswerAt`.
    *
-   * The server tracks all of this as the player's `activeRound` and is the only thing
-   * that ever decides correctness, timing validity, or advancement — see submitAnswer()
-   * and expireRound() below.
+   * There is no "chances" or elimination gate here anymore — every connected player keeps
+   * getting a fresh round immediately after each of theirs resolves (correct, wrong, or
+   * timed out) for as long as the match clock is running. The server tracks all of this as
+   * the player's `activeRound` and is the only thing that ever decides correctness, timing
+   * validity, or advancement — see submitAnswer() and expireRound() below.
    */
   private startRound(room: Room, player: RoomPlayer) {
-    if (room.status !== 'live') return;
-    if (!player.connected || player.chancesLeft <= 0) return;
+    if (room.status !== 'active') return;
+    if (player.connectionState !== 'connected') return;
     if (room.matchEndsAt !== null && Date.now() >= room.matchEndsAt) return;
 
     const generated = generateRound(room.gameKind);
@@ -305,7 +481,7 @@ export class RoomManager {
 
     activeRound.advanceTimer = setTimeout(() => {
       if (activeRound.resolved || player.activeRound !== activeRound) return; // superseded/cancelled
-      if (room.status !== 'live' || !player.connected) return;
+      if (room.status !== 'active' || player.connectionState !== 'connected') return;
 
       const now = Date.now();
       activeRound.phase = 'answer';
@@ -326,20 +502,20 @@ export class RoomManager {
     }, memorizeMs);
   }
 
-  /** Fires when a round's answer window elapses with no valid answer submitted — the
-   *  server-side fix for the audit's "an unanswered question freezes forever" finding.
-   *  Treated the same as a wrong answer (costs a chance) so stalling is never "free"
-   *  compared to genuinely answering, then the player is advanced to their next round. */
+  /** Fires when a round's answer window elapses with no valid answer submitted. Treated
+   *  exactly the same as a wrong answer (score -= 1) so stalling is never "free" compared
+   *  to genuinely (and wrongly) answering, then the player is immediately advanced to
+   *  their next round — nobody is ever left stuck staring at the same image. */
   private expireRound(room: Room, player: RoomPlayer, round: ActiveRound) {
     if (round.resolved || player.activeRound !== round) return;
     round.resolved = true;
 
-    player.chancesLeft = Math.max(0, player.chancesLeft - 1);
+    player.score -= 1;
     player.wrong += 1;
     player.lastAnswerAt = Date.now();
     player.activeRound = null;
 
-    const timeoutPayload: RoundTimeoutPublic = { roundId: round.roundId, correctToken: round.correctToken };
+    const timeoutPayload: RoundTimeoutPublic = { roundId: round.roundId, correctToken: round.correctToken, score: player.score };
     this.io.to(player.socketId).emit('match:round:timeout', timeoutPayload);
 
     this.broadcastRoom(room);
@@ -353,11 +529,11 @@ export class RoomManager {
    * whether this round is still open, whether it's too early/too late) comes from the
    * server's own `activeRound` state, never from anything the client asserts.
    */
-  submitAnswer(roomId: string, userId: string, roundId: string, optionToken: string): { correct: boolean; correctToken: string } {
+  submitAnswer(roomId: string, userId: string, roundId: string, optionToken: string): { correct: boolean; correctToken: string; score: number } {
     const room = this.rooms.get(roomId);
-    if (!room || room.status !== 'live') throw new Error('Match is not live');
+    if (!room || room.status !== 'active') throw new Error('Match is not live');
     const player = room.players.get(userId);
-    if (!player || !player.connected) throw new RoomAuthorizationError('Player not in match');
+    if (!player || player.connectionState !== 'connected') throw new RoomAuthorizationError('Player not in an active match');
 
     const round = player.activeRound;
     if (!round || round.roundId !== roundId) {
@@ -371,6 +547,7 @@ export class RoomManager {
     const now = Date.now();
     if (now < round.minAnswerAt) throw new Error('Answer rejected: submitted faster than humanly possible');
     if (now > round.answerDeadline) throw new Error('Round expired');
+    if (room.matchEndsAt !== null && now >= room.matchEndsAt) throw new Error('Match has already ended');
 
     // Resolve immediately, before doing anything else, so no other code path (including
     // the expiry timer firing a moment later) can ever process this same round twice.
@@ -383,7 +560,7 @@ export class RoomManager {
       player.score += 1;
       player.correct += 1;
     } else {
-      player.chancesLeft = Math.max(0, player.chancesLeft - 1);
+      player.score -= 1;
       player.wrong += 1;
     }
     player.lastAnswerAt = now;
@@ -391,22 +568,30 @@ export class RoomManager {
     this.broadcastRoom(room);
     this.startRound(room, player);
 
-    return { correct, correctToken: round.correctToken };
+    return { correct, correctToken: round.correctToken, score: player.score };
   }
 
-  private endMatch(room: Room) {
-    if (room.status === 'finished') return;
+  private endMatch(room: Room, endedBy: 'timer' | 'forfeit') {
+    if (room.status === 'finished' || room.status === 'cancelled') return;
     room.status = 'finished';
     room.clearTimers();
 
     const players = [...room.players.values()];
-    const { ranked, isVoidMatch, winnerIds, platformCut, winnerPayoutTotal, payoutByUserId } = computeMatchPayout(
+    const { ranked, isVoidMatch, isDraw, winnerIds, platformCut, winnerPayoutTotal, payoutByUserId } = computeMatchPayout(
       room.pool,
-      players.map((p) => ({ userId: p.userId, score: p.score, wrong: p.wrong, lastAnswerAt: p.lastAnswerAt })),
+      players.map((p) => ({
+        userId: p.userId,
+        score: p.score,
+        correct: p.correct,
+        wrong: p.wrong,
+        lastAnswerAt: p.lastAnswerAt,
+        forfeited: p.connectionState === 'forfeited',
+      })),
       room.winnerCount,
     );
+    const shouldRefund = isVoidMatch || isDraw;
 
-    if (room.pool > 0 && !isVoidMatch) {
+    if (room.pool > 0 && !shouldRefund) {
       recordTransaction({
         id: nanoid(12),
         userId: 'PLATFORM',
@@ -427,8 +612,8 @@ export class RoomManager {
       const p = room.players.get(ranked_p.userId);
       if (!p) throw new Error('Ranked player missing from room'); // invariant: ranked() only reorders the same player set
       const isWinner = winnerIds.has(p.userId);
-      const payout = isVoidMatch ? room.entryFee : (payoutByUserId.get(p.userId) ?? 0);
-      if (isVoidMatch) refundEntryFee(p.userId, room.entryFee, room.id);
+      const payout = shouldRefund ? room.entryFee : (payoutByUserId.get(p.userId) ?? 0);
+      if (shouldRefund) refundEntryFee(p.userId, room.entryFee, room.id);
       else if (payout > 0) creditPayout(p.userId, payout, room.id);
       return { player: p, score: p.score, correct: p.correct, wrong: p.wrong, payout, isWinner };
     });
@@ -442,6 +627,7 @@ export class RoomManager {
         wrong: r.wrong,
         payout: r.payout,
         isWinner: r.isWinner,
+        connectionState: r.player.connectionState,
       }));
       const payload: MatchResultPublic = {
         roomId: room.id,
@@ -452,14 +638,23 @@ export class RoomManager {
         platformCut,
         winnerPayoutTotal,
         isVoidMatch,
+        isDraw,
+        endedBy,
         results,
       };
-      this.io.to(player.socketId).emit('match:end', payload);
+      if (player.connectionState !== 'forfeited') this.io.to(player.socketId).emit('match:end', payload);
     }
 
-    // Keep the finished room around briefly for late joiners/reconnects to read state, then drop it.
-    setTimeout(() => this.rooms.delete(room.id), 30_000);
+    // Keep the finished room around briefly for late joiners/reconnects/rematch requests
+    // to read state, then drop it and forget every player's association with it.
+    setTimeout(() => {
+      for (const p of room.players.values()) {
+        if (this.activeRoomByUser.get(p.userId) === room.id) this.activeRoomByUser.delete(p.userId);
+      }
+      this.rooms.delete(room.id);
+    }, 30_000);
   }
 }
 
 export { InsufficientFundsError };
+export type { PlayerConnectionState };

@@ -85,8 +85,23 @@ function requireAuth(req: Request, res: Response, next: NextFunction): void {
 function jsonRateLimitHandler(_req: Request, res: Response): void {
   res.status(429).json({ error: 'Too many requests — please slow down and try again shortly' });
 }
-const signupLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false, handler: jsonRateLimitHandler });
-const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 15, standardHeaders: true, legacyHeaders: false, handler: jsonRateLimitHandler });
+// Limits are overridable via env purely so the self-test suite (which legitimately creates
+// far more than 30 throwaway accounts per run from one IP) doesn't trip its own rate limit —
+// production never sets these env vars and always gets the real 30/15 limits below.
+const signupLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: Number(process.env.ARCADE_SIGNUP_LIMIT) || 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: jsonRateLimitHandler,
+});
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: Number(process.env.ARCADE_LOGIN_LIMIT) || 15,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: jsonRateLimitHandler,
+});
 // Financial mutations get a stricter limiter than ordinary reads.
 const walletWriteLimiter = rateLimit({ windowMs: 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false, handler: jsonRateLimitHandler });
 const walletReadLimiter = rateLimit({ windowMs: 60 * 1000, limit: 60, standardHeaders: true, legacyHeaders: false, handler: jsonRateLimitHandler });
@@ -223,30 +238,34 @@ function socketRateLimited(socket: Socket, action: string, limit: number, window
 io.on('connection', (socket) => {
   const userId = socket.data.userId as string;
 
-  socket.on('rooms:create', (payload: { gameKind: GameKind; entryFee: number; format: RoomFormat }, ack) => {
+  // A page refresh / brief network drop / tab switch gets a brand-new Socket.IO connection
+  // — this is the server silently resuming that player into whatever match they were
+  // already authoritatively part of (if any), purely from server-side state. The client
+  // never has to ask for this, and never gets to say *which* match to resume into.
+  const resumedRoom = roomManager.reconnect(userId, socket.id);
+  if (resumedRoom) {
+    socket.join(resumedRoom.id);
+    socketSessions.set(socket.id, { userId, roomId: resumedRoom.id });
+  }
+
+  // The only way into a match: ask to join the server-side matchmaking queue for a mode.
+  // There is no room-id parameter here at all — the server alone decides which room (an
+  // existing open one, or a freshly created one) this player lands in, which makes "join
+  // an unauthorized/arbitrary match id" structurally impossible rather than merely checked.
+  socket.on('queue:join', (payload: { gameKind: GameKind; entryFee: number; format: RoomFormat }, ack) => {
     try {
-      if (socketRateLimited(socket, 'rooms:create', 10, 60_000)) throw new Error('Too many rooms created — slow down');
-      if (!GAME_KINDS.includes(payload.gameKind)) throw new Error('Invalid game kind');
-      if (!ENTRY_FEE_TIERS.includes(payload.entryFee as (typeof ENTRY_FEE_TIERS)[number])) {
+      if (socketRateLimited(socket, 'queue:join', 10, 60_000)) throw new Error('Too many matchmaking requests — slow down');
+      if (!GAME_KINDS.includes(payload?.gameKind)) throw new Error('Invalid game kind');
+      if (!ENTRY_FEE_TIERS.includes(payload?.entryFee as (typeof ENTRY_FEE_TIERS)[number])) {
         throw new Error('Invalid entry fee tier');
       }
-      if (!ROOM_FORMATS.some((f) => f.id === payload.format)) throw new Error('Invalid room format');
-      const room = roomManager.createRoom(payload.gameKind, payload.entryFee, payload.format);
-      ack?.({ ok: true, roomId: room.id });
-    } catch (err) {
-      ack?.({ ok: false, error: err instanceof Error ? err.message : 'Failed to create room' });
-    }
-  });
-
-  socket.on('rooms:join', (payload: { roomId: string }, ack) => {
-    try {
-      if (socketRateLimited(socket, 'rooms:join', 30, 60_000)) throw new Error('Too many join attempts — slow down');
+      if (!ROOM_FORMATS.some((f) => f.id === payload?.format)) throw new Error('Invalid room format');
       const user = getUser(userId);
       if (!user) throw new Error('Unknown user');
-      const room = roomManager.joinRoom(payload.roomId, user, socket.id);
+      const room = roomManager.queueJoin(payload.gameKind, payload.entryFee, payload.format, user, socket.id);
       socket.join(room.id);
       socketSessions.set(socket.id, { userId, roomId: room.id });
-      ack?.({ ok: true, room: roomManager.getRoomPublic(room.id, userId) });
+      ack?.({ ok: true, roomId: room.id, room: roomManager.getRoomPublic(room.id, userId) });
     } catch (err) {
       const message =
         err instanceof InsufficientFundsError ? 'Insufficient wallet balance for this room' : (err as Error).message;
@@ -254,15 +273,25 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('queue:leave', (payload: { roomId: string }, ack) => {
+    if (socketRateLimited(socket, 'queue:leave', 20, 60_000)) return ack?.({ ok: false, error: 'Slow down' });
+    roomManager.leaveRoom(payload?.roomId, userId);
+    socket.leave(payload?.roomId);
+    socketSessions.delete(socket.id);
+    ack?.({ ok: true });
+  });
+
   socket.on('rooms:leave', (payload: { roomId: string }, ack) => {
-    roomManager.leaveRoom(payload.roomId, userId);
-    socket.leave(payload.roomId);
+    if (socketRateLimited(socket, 'rooms:leave', 20, 60_000)) return ack?.({ ok: false, error: 'Slow down' });
+    roomManager.leaveRoom(payload?.roomId, userId);
+    socket.leave(payload?.roomId);
     socketSessions.delete(socket.id);
     ack?.({ ok: true });
   });
 
   socket.on('rooms:ready', (payload: { roomId: string }, ack) => {
-    roomManager.setReady(payload.roomId, userId);
+    if (socketRateLimited(socket, 'rooms:ready', 10, 10_000)) return ack?.({ ok: false, error: 'Slow down' });
+    roomManager.setReady(payload?.roomId, userId);
     ack?.({ ok: true });
   });
 
@@ -272,14 +301,33 @@ io.on('connection', (socket) => {
       // memorize/answer timing (see rooms.ts), this is just a backstop against a client
       // hammering the event handler itself (e.g. spamming stale/garbage round ids).
       if (socketRateLimited(socket, 'match:answer', 60, 10_000)) throw new Error('Too many answers submitted — slow down');
-      const result = roomManager.submitAnswer(payload.roomId, userId, payload.roundId, payload.optionToken);
+      const result = roomManager.submitAnswer(payload?.roomId, userId, payload?.roundId, payload?.optionToken);
       ack?.({ ok: true, ...result });
     } catch (err) {
       if (err instanceof RoomAuthorizationError) {
         // eslint-disable-next-line no-console
-        console.warn(`Rejected match:answer from ${userId} in room ${payload.roomId}: ${err.message}`);
+        console.warn(`Rejected match:answer from ${userId} in room ${payload?.roomId}: ${err.message}`);
       }
       ack?.({ ok: false, error: err instanceof Error ? err.message : 'Failed to submit answer' });
+    }
+  });
+
+  // REMATCH sends a request to the server; the server alone decides whether a rematch can
+  // be created (only from a match this exact user just finished) and re-runs them through
+  // the same queue-join path as any other match — never a client-only/locally-fabricated room.
+  socket.on('match:rematch', (_payload: unknown, ack) => {
+    try {
+      if (socketRateLimited(socket, 'match:rematch', 10, 60_000)) throw new Error('Too many rematch requests — slow down');
+      const user = getUser(userId);
+      if (!user) throw new Error('Unknown user');
+      const room = roomManager.rematch(user, socket.id);
+      socket.join(room.id);
+      socketSessions.set(socket.id, { userId, roomId: room.id });
+      ack?.({ ok: true, roomId: room.id, room: roomManager.getRoomPublic(room.id, userId) });
+    } catch (err) {
+      const message =
+        err instanceof InsufficientFundsError ? 'Insufficient wallet balance for a rematch' : (err as Error).message;
+      ack?.({ ok: false, error: message });
     }
   });
 
