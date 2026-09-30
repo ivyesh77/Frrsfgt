@@ -53,8 +53,21 @@ const roomManager = new RoomManager(io);
 function setSessionCookie(res: Response, token: string): void {
   res.cookie(SESSION_COOKIE, token, {
     httpOnly: true, // never readable by JS — closes the "identity stored as plain JS-readable localStorage" gap
-    sameSite: 'lax', // the actual CSRF defense: never attached to a cross-site POST/fetch
-    secure: IS_PRODUCTION, // HTTPS-only once actually deployed behind TLS; relaxed for local http dev
+    // CSRF defense: in a real production deployment (NODE_ENV=production) this stays
+    // 'lax' exactly as documented in SECURITY_FIX_REPORT.md §F.4 — the cookie is then
+    // never attached to a cross-site request at all, which is the actual protection.
+    // This sandbox's live-preview tunnel, however, serves the app inside a cross-site
+    // iframe on a different top-level origin (Arena's own UI embeds the preview URL) —
+    // under that origin, a 'lax' cookie is NEVER sent on any fetch/XHR/WebSocket made
+    // from inside the iframe (only true top-level navigations qualify for 'lax'), which
+    // silently broke every authenticated action right after login/signup. 'none' is the
+    // only SameSite value browsers will actually deliver in that embedded context, and it
+    // is only usable at all paired with `secure: true` — which is safe here because the
+    // preview is always served over the tunnel's own HTTPS, never plain HTTP. This
+    // relaxation is scoped to non-production only; a real standalone deployment (its own
+    // domain, not iframe-embedded) keeps the strict 'lax'/CSRF-safe behavior unchanged.
+    sameSite: IS_PRODUCTION ? 'lax' : 'none',
+    secure: true, // 'none' requires this, and the preview tunnel is always HTTPS anyway
     maxAge: SESSION_TTL_MS,
     path: '/',
   });
