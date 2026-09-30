@@ -32,6 +32,7 @@ import {
   AdminRateLimitedError,
   authenticateAdmin,
   bootstrapSuperAdminIfNeeded,
+  changeOwnAdminPassword,
   createAdminSession,
   destroyAdminSession,
   destroyAllSessionsForAdmin,
@@ -164,6 +165,34 @@ export function createAdminApp(deps: AdminServerDeps) {
   app.get('/admin/auth/me', requireAdmin, (req, res) => {
     const admin = req.admin!;
     res.json({ admin: toPublicAdmin(admin), permissions: PERMISSIONS.filter((p) => roleHasPermission(admin.role, p)) });
+  });
+
+  // Self-service password rotation — every admin (any role) may change their OWN password,
+  // no extra permission required, but the current password must still be re-proven. After
+  // a successful change, every other session for this admin is destroyed (this one is kept
+  // alive by re-issuing a fresh token) so a leaked old credential can't keep riding an old
+  // session forever once the holder rotates their password.
+  app.post('/admin/auth/change-password', requireAdmin, loginLimiter, async (req, res) => {
+    const admin = req.admin!;
+    const currentPassword = typeof req.body?.currentPassword === 'string' ? req.body.currentPassword : '';
+    const newPassword = typeof req.body?.newPassword === 'string' ? req.body.newPassword : '';
+    const rid = requestId(req);
+    if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Current and new password are required' });
+    try {
+      const updated = await changeOwnAdminPassword(admin.id, currentPassword, newPassword);
+      const authHeader = req.headers.authorization;
+      const bearer = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+      const cookieToken = (req.cookies as Record<string, string> | undefined)?.[ADMIN_SESSION_COOKIE];
+      const currentToken = bearer ?? cookieToken;
+      destroyAllSessionsForAdmin(admin.id); // rotate out every existing session, including this request's...
+      const { token } = createAdminSession(admin.id); // ...then issue one fresh session so this browser stays logged in.
+      setAdminCookie(res, token);
+      writeAudit({ admin: updated, action: 'CHANGE_OWN_PASSWORD', targetKind: 'admin', targetId: admin.id, reason: 'Self-service password change', result: 'success', requestId: rid });
+      void currentToken; // the old token for this request was already invalidated above; nothing else to do with it
+      res.json({ ok: true, admin: toPublicAdmin(updated), token });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to change password' });
+    }
   });
 
   app.use('/admin', readLimiter); // baseline read budget for everything below; specific write routes layer writeLimiter on top

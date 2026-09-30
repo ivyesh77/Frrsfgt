@@ -1,6 +1,8 @@
+import { useState } from 'react';
 import { usePolling } from '../hooks';
 import { Badge, Empty, ErrorBox, Loading } from '../components/ui';
 import { fmtTime } from '../format';
+import { api, ApiError, setBearerToken } from '../api';
 
 interface AuditEntry {
   id: string;
@@ -20,7 +22,88 @@ export function AuditLogPage() {
 }
 
 export function MyActivityLog() {
-  return <AuditTable title="My Activity" subtitle="Your own recent actions, for accountability." path="/admin/me/activity" />;
+  return (
+    <div>
+      <ChangePasswordPanel />
+      <AuditTable title="My Activity" subtitle="Your own recent actions, for accountability." path="/admin/me/activity" />
+    </div>
+  );
+}
+
+function ChangePasswordPanel() {
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [success, setSuccess] = useState(false);
+
+  const mismatch = confirmPassword.length > 0 && newPassword !== confirmPassword;
+  const canSubmit = currentPassword.length > 0 && newPassword.length >= 12 && newPassword === confirmPassword && !busy;
+
+  async function submit() {
+    setBusy(true);
+    setErrorMsg(null);
+    setSuccess(false);
+    try {
+      const res = await api.post<{ ok: true; token: string }>('/admin/auth/change-password', { currentPassword, newPassword });
+      setBearerToken(res.token); // the server rotated every session for this admin, including this one — adopt the fresh token it just issued
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      setSuccess(true);
+    } catch (err) {
+      setErrorMsg(err instanceof ApiError ? err.message : 'Failed to change password');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="admin-panel" style={{ marginBottom: 20 }}>
+      <div className="admin-panel__title">Change your password</div>
+      <p className="admin-page-sub" style={{ marginTop: -4 }}>
+        Only you can change your own password — no admin, including a SUPER_ADMIN, can reset it for you. Requires your current password. Changing it signs out every other session
+        for this account.
+      </p>
+      {success && (
+        <div className="admin-error" style={{ borderColor: 'var(--green, #2d8a4e)', color: 'var(--green, #2d8a4e)' }}>
+          Password changed. You're still signed in here; any other open sessions were signed out.
+        </div>
+      )}
+      {errorMsg && <ErrorBox message={errorMsg} />}
+      <div className="admin-toolbar">
+        <input
+          className="admin-input"
+          type="password"
+          placeholder="Current password"
+          value={currentPassword}
+          onChange={(e) => setCurrentPassword(e.target.value)}
+          autoComplete="current-password"
+        />
+        <input
+          className="admin-input"
+          type="password"
+          placeholder="New password (min 12 chars)"
+          value={newPassword}
+          onChange={(e) => setNewPassword(e.target.value)}
+          autoComplete="new-password"
+        />
+        <input
+          className="admin-input"
+          type="password"
+          placeholder="Confirm new password"
+          value={confirmPassword}
+          onChange={(e) => setConfirmPassword(e.target.value)}
+          autoComplete="new-password"
+        />
+      </div>
+      {mismatch && <div style={{ color: 'var(--red, #c0392b)', fontSize: 12, marginBottom: 8 }}>Passwords don't match.</div>}
+      <button className="admin-btn admin-btn--sm" disabled={!canSubmit} onClick={submit}>
+        {busy ? 'Changing…' : 'Change password'}
+      </button>
+    </div>
+  );
 }
 
 function AuditTable({ title, subtitle, path }: { title: string; subtitle: string; path: string }) {

@@ -55,7 +55,14 @@ export function AdminUsersPage() {
         <div className="admin-panel__title">Create admin account</div>
         <div className="admin-toolbar">
           <input className="admin-input" placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} />
-          <input className="admin-input" type="password" placeholder="Password (min 12 chars)" value={password} onChange={(e) => setPassword(e.target.value)} />
+          <input
+            className="admin-input"
+            type="password"
+            placeholder="Password (min 12 chars)"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            autoComplete="new-password"
+          />
           <select className="admin-select" value={role} onChange={(e) => setRole(e.target.value as AdminRole)}>
             {ADMIN_ROLES.map((r) => (
               <option key={r} value={r}>

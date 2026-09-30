@@ -133,6 +133,24 @@ export function destroyAdminSession(token: string | undefined | null): void {
   adminSessions.delete(token);
 }
 
+/** Self-service password rotation for the currently authenticated admin only — requires
+ *  re-proving the current password (never trusts a bare "I am this admin" claim from the
+ *  session alone for a credential change). By design there is no "reset someone else's
+ *  admin password" endpoint: a SUPER_ADMIN can deactivate another admin's account (forcing
+ *  them to be recreated), but can never silently take over or reset another admin's
+ *  password without their cooperation. */
+export async function changeOwnAdminPassword(adminId: string, currentPassword: string, newPassword: string): Promise<AdminAccount> {
+  const admin = listAdmins().find((a) => a.id === adminId);
+  if (!admin) throw new AdminInvalidCredentialsError();
+  const ok = await verifyPassword(currentPassword, admin.passwordHash);
+  if (!ok) throw new AdminInvalidCredentialsError();
+  if (newPassword.length < 12) throw new Error('New password must be at least 12 characters');
+  const passwordHash = await hashPassword(newPassword);
+  const updated: AdminAccount = { ...admin, passwordHash };
+  upsertAdmin(updated);
+  return updated;
+}
+
 export function destroyAllSessionsForAdmin(adminId: string): number {
   let count = 0;
   for (const [token, session] of adminSessions) {

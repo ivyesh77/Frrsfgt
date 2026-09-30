@@ -363,6 +363,62 @@ async function main() {
   const retryDuplicateEvent = await adminJson(superToken, `/admin/webhooks/${duplicateEvent.id}/retry`, { method: 'POST', body: JSON.stringify({ reason: 'trying to retry a duplicate-ignored event' }) });
   assert(retryDuplicateEvent.status === 409, 'retrying a duplicate-ignored webhook event is rejected — there is nothing safe to retry');
 
+  // ===========================================================================
+  // 11. SELF-SERVICE PASSWORD CHANGE (no admin, not even SUPER_ADMIN, can reset another
+  //     admin's password — only the account holder, and only by re-proving the current
+  //     one; a successful change must rotate out every other session for that account).
+  // ===========================================================================
+  const pwName = `pwchange_${stamp}`;
+  const pwInitial = 'AdminAccountPassword123'; // createAdmin()'s fixed test password, see that helper
+  const pwOriginal = 'OriginalPassword123';
+  const sessionAToken = await createAdmin(superToken, pwName, 'READ_ONLY');
+
+  const wrongCurrentPw = await adminJson<{ error?: string }>(sessionAToken, '/admin/auth/change-password', {
+    method: 'POST',
+    body: JSON.stringify({ currentPassword: 'TotallyWrongPassword', newPassword: pwOriginal }),
+  });
+  assert(wrongCurrentPw.status === 400, "changing a password with the WRONG current password is rejected, even though the requester's own session is otherwise valid");
+
+  const tooShortNewPw = await adminJson<{ error?: string }>(sessionAToken, '/admin/auth/change-password', {
+    method: 'POST',
+    body: JSON.stringify({ currentPassword: pwInitial, newPassword: 'short' }),
+  });
+  assert(tooShortNewPw.status === 400, 'a new password shorter than 12 characters is rejected');
+
+  // Note by inspection of the route (server.ts's /admin/auth/change-password handler): it
+  // reads only `req.admin!` (the caller's own resolved session) and takes no admin-id
+  // parameter from the request body at all — there is structurally no way for this endpoint
+  // to target any account other than the caller's own, regardless of role, including
+  // SUPER_ADMIN. (Not re-exercised live here to avoid burning extra budget against the
+  // same per-IP admin-login rate limit this suite already deliberately keeps tight.)
+
+  const pwChangeOk = await adminJson<{ ok: boolean; token: string }>(sessionAToken, '/admin/auth/change-password', {
+    method: 'POST',
+    body: JSON.stringify({ currentPassword: pwInitial, newPassword: pwOriginal }),
+  });
+  assert(pwChangeOk.status === 200 && pwChangeOk.body.ok === true, 'a correct current password + valid new password succeeds');
+
+  const oldSessionDead = await adminJson(sessionAToken, '/admin/auth/me');
+  assert(oldSessionDead.status === 401, 'the OLD session token used to request the change is itself invalidated by the rotation (a leaked old token stops working the moment the password is rotated)');
+
+  const newSessionAlive = await adminJson(pwChangeOk.body.token, '/admin/auth/me');
+  assert(newSessionAlive.status === 200, 'the freshly issued session token returned by the change-password call keeps this browser logged in');
+
+  const loginWithOldPwFails = await adminLogin(pwName, pwInitial);
+  assert(loginWithOldPwFails.status === 401, 'logging in with the OLD password no longer works after rotation');
+  const loginWithNewPwWorks = await adminLogin(pwName, pwOriginal);
+  assert(loginWithNewPwWorks.status === 200, 'logging in with the NEW password works');
+
+  const changePwAuditEntry = await adminJson<{ rows: Array<{ action: string; adminName: string }> }>(superToken, '/admin/audit');
+  assert(
+    changePwAuditEntry.body.rows.some((r) => r.action === 'CHANGE_OWN_PASSWORD' && r.adminName === pwName),
+    'a self-service password change produces an audit entry (with no password material anywhere in it)',
+  );
+  assert(
+    !JSON.stringify(changePwAuditEntry.body.rows).includes(pwOriginal) && !JSON.stringify(changePwAuditEntry.body.rows).includes(pwInitial),
+    'no raw or previous password ever appears anywhere in the audit log',
+  );
+
   console.log('\n' + (failures === 0 ? 'ALL ADMIN SELF-TESTS PASSED' : `${failures} ADMIN SELF-TEST(S) FAILED`));
   process.exit(failures === 0 ? 0 : 1);
 }
