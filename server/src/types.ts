@@ -89,6 +89,14 @@ export const STARTING_WALLET_BALANCE = 1000;
 // in wallet.ts, which is the single choke point every route must use.
 // ---------------------------------------------------------------------------
 
+/** Account standing, settable only by an authorized admin action (see server/src/admin/
+ *  users.ts) — never client-settable in any form. `suspended` blocks login/gameplay
+ *  temporarily and reversibly; `banned` is the harder, still-reversible-by-an-admin form.
+ *  Both are enforced at the point of login (authenticateUser) AND by force-invalidating
+ *  every existing session for that user the moment the action is taken, so an already
+ *  logged-in tab cannot keep playing after a ban. */
+export type AccountStatus = 'active' | 'suspended' | 'banned';
+
 export interface User {
   id: string;
   /** Normalized (trimmed + lowercased) display name, used as the unique login key so
@@ -101,6 +109,9 @@ export interface User {
   passwordHash: string;
   walletBalance: number;
   createdAt: number;
+  /** Defaults to 'active' for every account created before this field existed — see
+   *  store.ts loadDb() normalization. */
+  status: AccountStatus;
 }
 
 /** The only user shape ever allowed to leave the server. */
@@ -111,7 +122,7 @@ export interface PublicUser {
   createdAt: number;
 }
 
-export type TransactionType = 'topup' | 'withdrawal' | 'entry_fee' | 'refund' | 'payout' | 'platform_fee' | 'signup_bonus';
+export type TransactionType = 'topup' | 'withdrawal' | 'entry_fee' | 'refund' | 'payout' | 'platform_fee' | 'signup_bonus' | 'admin_adjustment';
 
 /** Full transaction lifecycle. Every transaction recorded by this demo ledger today
  *  completes synchronously and is stored as 'completed' immediately — but the type
@@ -343,7 +354,10 @@ export interface MatchResultPublic {
   isDraw: boolean;
   /** Why the match ended — `timer` is the normal case; `forfeit` means every remaining
    *  opponent forfeited (disconnected past the reconnect grace window) before the timer
-   *  elapsed, most relevant for a duel where one forfeit immediately decides the match. */
-  endedBy: 'timer' | 'forfeit';
+   *  elapsed, most relevant for a duel where one forfeit immediately decides the match.
+   *  `admin_cancelled` means an authorized admin force-closed a broken/stuck match — always
+   *  treated as a full void/refund, never a computed winner (see admin/rooms.ts — there is
+   *  no "set winner" admin shortcut anywhere in this codebase). */
+  endedBy: 'timer' | 'forfeit' | 'admin_cancelled';
   results: MatchResultPlayer[];
 }

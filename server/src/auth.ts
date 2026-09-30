@@ -90,6 +90,36 @@ export function destroySession(token: string | undefined | null): void {
   sessions.delete(token);
 }
 
+/** Invalidates EVERY active session for a given account, regardless of which device/tab it
+ *  was created from — used by the admin "force logout" action and automatically whenever
+ *  an admin suspends/bans a user, so an already-open tab cannot keep playing/spending after
+ *  the action is taken. Returns how many sessions were actually destroyed (0 is a normal,
+ *  valid result for an account with no active session). */
+export function destroyAllSessionsForUser(userId: string): number {
+  let count = 0;
+  for (const [token, session] of sessions) {
+    if (session.userId === userId) {
+      sessions.delete(token);
+      count += 1;
+    }
+  }
+  return count;
+}
+
+/** Read-only visibility for the admin "session/device summary" panel — deliberately
+ *  returns only the count and the nearest expiry, never the token itself (a session token
+ *  is a live credential; even an admin should never be able to read or reconstruct one). */
+export function countActiveSessionsForUser(userId: string): { count: number; nearestExpiresAt: number | null } {
+  let count = 0;
+  let nearestExpiresAt: number | null = null;
+  for (const session of sessions.values()) {
+    if (session.userId !== userId) continue;
+    count += 1;
+    if (nearestExpiresAt === null || session.expiresAt < nearestExpiresAt) nearestExpiresAt = session.expiresAt;
+  }
+  return { count, nearestExpiresAt };
+}
+
 /** Test-only escape hatch so the self-test suite starts from a clean slate. */
 export function __resetSessionsForTests(): void {
   sessions.clear();

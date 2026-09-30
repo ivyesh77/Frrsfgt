@@ -4,6 +4,7 @@ import type { NextFunction, Request, Response } from 'express';
 import express from 'express';
 import rateLimit from 'express-rate-limit';
 import { createServer } from 'node:http';
+import { nanoid } from 'nanoid';
 import { Server, type Socket } from 'socket.io';
 import { createSession, destroySession, resolveSession, SESSION_TTL_MS } from './auth.js';
 import { GAME_KIND_LABELS } from './gameKinds/index.js';
@@ -12,6 +13,7 @@ import { RoomAuthorizationError, RoomManager, InsufficientFundsError } from './r
 import { getUser } from './store.js';
 import { ENTRY_FEE_TIERS, GAME_KINDS, ROOM_FORMATS, type GameKind, type RoomFormat } from './types.js';
 import {
+  AccountSuspendedError,
   InvalidCredentialsError,
   UsernameTakenError,
   authenticateUser,
@@ -22,8 +24,14 @@ import {
   topUp,
   withdraw,
 } from './wallet.js';
+import { startAdminServer } from './admin/server.js';
+import { appendLoginAttempt } from './admin/store.js';
+import { getEffectiveFlags } from './admin/flags.js';
+import { isUnderMaintenance, getMaintenanceMessage } from './admin/maintenance.js';
+import { recordEvent } from './admin/signals.js';
 
 const PORT = Number(process.env.PORT) || 8787;
+const ADMIN_PORT = Number(process.env.ADMIN_PORT) || 8788;
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 const SESSION_COOKIE = 'arena_session';
 
@@ -141,6 +149,7 @@ app.get('/api/health', (_req, res) => {
 // REST: auth
 // ---------------------------------------------------------------------------
 app.post('/api/auth/signup', signupLimiter, async (req, res) => {
+  if (isUnderMaintenance('platform')) return res.status(503).json({ error: getMaintenanceMessage('platform') });
   const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
   if (!name || name.length < 2) return res.status(400).json({ error: 'Name must be at least 2 characters' });
@@ -150,6 +159,7 @@ app.post('/api/auth/signup', signupLimiter, async (req, res) => {
     const user = await registerUser(name, password);
     const { token } = createSession(user.id);
     setSessionCookie(res, token);
+    appendLoginAttempt({ id: nanoid(10), actor: 'player', usernameAttempted: name, success: true, timestamp: Date.now(), ip: req.ip ?? 'unknown' });
     // `token` is also returned in the body as a fallback transport for exactly the
     // scenario described on requireAuth() above (cross-site-iframe cookie blocking). The
     // client only holds this in memory for the lifetime of the tab (see src/arena/api.ts)
@@ -163,6 +173,7 @@ app.post('/api/auth/signup', signupLimiter, async (req, res) => {
 });
 
 app.post('/api/auth/login', loginLimiter, async (req, res) => {
+  if (isUnderMaintenance('platform')) return res.status(503).json({ error: getMaintenanceMessage('platform') });
   const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
   if (!name || !password) return res.status(400).json({ error: 'Name and password are required' });
@@ -171,9 +182,12 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
     const user = await authenticateUser(name, password);
     const { token } = createSession(user.id);
     setSessionCookie(res, token);
+    appendLoginAttempt({ id: nanoid(10), actor: 'player', usernameAttempted: name, success: true, timestamp: Date.now(), ip: req.ip ?? 'unknown' });
     res.json({ user: toPublicUser(user), token });
   } catch (err) {
+    appendLoginAttempt({ id: nanoid(10), actor: 'player', usernameAttempted: name, success: false, timestamp: Date.now(), ip: req.ip ?? 'unknown' });
     if (err instanceof InvalidCredentialsError) return res.status(401).json({ error: err.message });
+    if (err instanceof AccountSuspendedError) return res.status(403).json({ error: err.message });
     res.status(400).json({ error: err instanceof Error ? err.message : 'Log in failed' });
   }
 });
@@ -212,6 +226,7 @@ app.get('/api/wallet/stats', requireAuth, walletReadLimiter, (req, res) => {
 });
 
 app.post('/api/wallet/topup', requireAuth, walletWriteLimiter, (req, res) => {
+  if (isUnderMaintenance('wallet') || isUnderMaintenance('deposit')) return res.status(503).json({ error: getMaintenanceMessage('deposit') });
   const amount = Number(req.body?.amount);
   const requestId = typeof req.body?.requestId === 'string' ? req.body.requestId : undefined;
   try {
@@ -223,6 +238,7 @@ app.post('/api/wallet/topup', requireAuth, walletWriteLimiter, (req, res) => {
 });
 
 app.post('/api/wallet/withdraw', requireAuth, walletWriteLimiter, (req, res) => {
+  if (isUnderMaintenance('wallet') || isUnderMaintenance('withdraw')) return res.status(503).json({ error: getMaintenanceMessage('withdraw') });
   const amount = Number(req.body?.amount);
   const requestId = typeof req.body?.requestId === 'string' ? req.body.requestId : undefined;
   try {
@@ -295,11 +311,15 @@ io.on('connection', (socket) => {
   socket.on('queue:join', (payload: { gameKind: GameKind; entryFee: number; format: RoomFormat }, ack) => {
     try {
       if (socketRateLimited(socket, 'queue:join', 10, 60_000)) throw new Error('Too many matchmaking requests — slow down');
+      if (isUnderMaintenance('matchmaking') || isUnderMaintenance('game')) throw new Error(getMaintenanceMessage('matchmaking'));
       if (!GAME_KINDS.includes(payload?.gameKind)) throw new Error('Invalid game kind');
       if (!ENTRY_FEE_TIERS.includes(payload?.entryFee as (typeof ENTRY_FEE_TIERS)[number])) {
         throw new Error('Invalid entry fee tier');
       }
       if (!ROOM_FORMATS.some((f) => f.id === payload?.format)) throw new Error('Invalid room format');
+      const flags = getEffectiveFlags();
+      if (payload?.format === 'duel' && !flags.duelEnabled) throw new Error('1v1 Duel is temporarily disabled');
+      if (payload?.format === 'squad' && !flags.squadEnabled) throw new Error('1v1v1v1 Squad is temporarily disabled');
       const user = getUser(userId);
       if (!user) throw new Error('Unknown user');
       const room = roomManager.queueJoin(payload.gameKind, payload.entryFee, payload.format, user, socket.id);
@@ -340,7 +360,10 @@ io.on('connection', (socket) => {
       // Deliberately generous — legitimate pacing is already capped by the round's own
       // memorize/answer timing (see rooms.ts), this is just a backstop against a client
       // hammering the event handler itself (e.g. spamming stale/garbage round ids).
-      if (socketRateLimited(socket, 'match:answer', 60, 10_000)) throw new Error('Too many answers submitted — slow down');
+      if (socketRateLimited(socket, 'match:answer', 60, 10_000)) {
+        recordEvent('answerRateLimited', userId);
+        throw new Error('Too many answers submitted — slow down');
+      }
       const result = roomManager.submitAnswer(payload?.roomId, userId, payload?.roundId, payload?.optionToken);
       ack?.({ ok: true, ...result });
     } catch (err) {
@@ -394,4 +417,14 @@ httpServer.listen(PORT, () => {
   console.log(`Memory Match arcade server listening on :${PORT}`);
 });
 
-export { app, httpServer, io, PORT };
+// The admin operations center is a genuinely SEPARATE Express app on its own,
+// independently configurable port (ADMIN_PORT, default 8788) — never mounted on the same
+// router as the player-facing API, and never reachable through it. It is started here (in
+// the same Node process as the player server, sharing the exact same `roomManager`/`io`
+// instances by direct reference) so every admin read reflects the real, live backend state
+// instead of a second, potentially-divergent copy of it — see admin/server.ts's own
+// doc-comment for the full reasoning. Set ADMIN_ALLOWED_ORIGIN to the admin web app's
+// actual origin before deploying this anywhere reachable by the public internet.
+const adminServer = startAdminServer({ roomManager, io }, ADMIN_PORT);
+
+export { app, httpServer, io, PORT, ADMIN_PORT, adminServer };

@@ -12,6 +12,11 @@
  * plus every new item in the Task 11 multiplayer spec.
  */
 process.env.PORT = process.env.PORT || '8799';
+// Keep this suite's admin server on its own throwaway port too, distinct from both the
+// live dev admin port (8788) and adminSelftest.ts's own port — this suite doesn't exercise
+// admin functionality itself (see adminSelftest.ts for that), it just needs index.ts's
+// unconditional admin-server bootstrap to not collide with anything else already running.
+process.env.ADMIN_PORT = process.env.ADMIN_PORT || '8798';
 // Generous-but-still-fast overrides: short enough to keep the suite quick, long enough to
 // have comfortable headroom over sandbox scheduling jitter so the suite never flakes.
 process.env.ARCADE_MATCH_DURATION_MS = '4000';

@@ -31,8 +31,15 @@ function loadDb(): DbShape {
     if (!existsSync(DATA_FILE)) return { users: {}, transactions: [] };
     const raw = readFileSync(DATA_FILE, 'utf-8');
     const parsed = JSON.parse(raw) as Partial<DbShape>;
+    const users = parsed.users ?? {};
+    // Backfill `status` for any record written before that field existed — never let a
+    // pre-existing account silently become un-loggable or bypass the admin status check.
+    for (const id of Object.keys(users)) {
+      const record = users[id] as User;
+      if (!record.status) record.status = 'active';
+    }
     return {
-      users: parsed.users ?? {},
+      users,
       transactions: Array.isArray(parsed.transactions) ? parsed.transactions : [],
     };
   } catch {
@@ -90,6 +97,32 @@ export function getTransactionsForUser(userId: string, limit = 25): Transaction[
  *  cap for the ledger UI would quietly under-count an active player's history. */
 export function getAllTransactionsForUser(userId: string): Transaction[] {
   return db.transactions.filter((t) => t.userId === userId);
+}
+
+// ---------------------------------------------------------------------------
+// Admin-only read access. These never leave the server process directly — every admin
+// route funnels its response through its own public-projection function (see
+// server/src/admin/users.ts / transactions.ts) exactly the same way the player-facing
+// routes funnel through toPublicUser(). Nothing here is a new trust boundary: it is the
+// same store, just with the query shapes an operator screen actually needs (list-all,
+// search, paginate) instead of the single-user lookups the player API needs.
+// ---------------------------------------------------------------------------
+
+/** Every user record, unfiltered — callers are responsible for pagination/redaction. Used
+ *  only by the admin subsystem (server/src/admin/*), which is itself gated by admin
+ *  auth + RBAC before this is ever reached. */
+export function listAllUsersRaw(): User[] {
+  return Object.values(db.users);
+}
+
+export function countUsers(): number {
+  return Object.keys(db.users).length;
+}
+
+/** Every transaction ever recorded, across every user — used only by admin transaction
+ *  search/reporting and analytics, which apply their own pagination/filtering on top. */
+export function listAllTransactionsRaw(): Transaction[] {
+  return db.transactions;
 }
 
 /** Test-only escape hatch so the self-test suite starts from a clean slate. */

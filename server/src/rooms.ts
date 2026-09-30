@@ -5,14 +5,11 @@ import { newRoundToken } from './gameKinds/shared.js';
 import { computeMatchPayout } from './payout.js';
 import { debitEntryFee, refundEntryFee, creditPayout, InsufficientFundsError } from './wallet.js';
 import { recordTransaction } from './store.js';
+import { recordMatch } from './admin/matchHistory.js';
+import { recordEvent } from './admin/signals.js';
+import { getEffectiveGameConfig } from './admin/config.js';
 import {
-  getMatchDurationMs,
   roomFormatMeta,
-  getReadyCountdownMs,
-  getRoundMemorizeMs,
-  getRoundAnswerMs,
-  getLobbyReadyTimeoutMs,
-  getReconnectGraceMs,
   MIN_REACTION_MS,
   type ActiveRound,
   type GameKind,
@@ -50,6 +47,10 @@ class Room {
   startsAt: number | null = null;
   matchEndsAt: number | null = null;
   timers: NodeJS.Timeout[] = [];
+  /** When this room was first created (entered the queue) — used only by the admin Rooms
+   *  screen to show elapsed time; never exposed to the player client. */
+  createdAt = Date.now();
+  matchStartedAt: number | null = null;
 
   constructor(gameKind: GameKind, entryFee: number, format: RoomFormat) {
     this.gameKind = gameKind;
@@ -198,6 +199,7 @@ export class RoomManager {
     };
     room.players.set(user.id, player);
     this.activeRoomByUser.set(user.id, room.id);
+    recordEvent('queueJoin', user.id);
 
     if (room.players.size >= room.maxPlayers) {
       this.openQueues.delete(key);
@@ -240,6 +242,7 @@ export class RoomManager {
       if (player.forfeitTimer) {
         clearTimeout(player.forfeitTimer);
         player.forfeitTimer = null;
+        recordEvent('reconnect', userId); // only counts a genuine reconnect-after-drop, not every ordinary fresh connect
       }
       player.connectionState = 'connected';
       if (room.status === 'active' && !player.activeRound) this.startRound(room, player);
@@ -322,7 +325,7 @@ export class RoomManager {
     player.connectionState = 'disconnected';
     this.broadcastRoom(room);
 
-    const graceMs = getReconnectGraceMs();
+    const graceMs = getEffectiveGameConfig().reconnectGraceMs;
     player.forfeitTimer = setTimeout(() => this.forfeitPlayer(room, player), graceMs);
   }
 
@@ -352,7 +355,7 @@ export class RoomManager {
   /** Refunds every still-seated player and tears the room down without ever attempting to
    *  pick a winner — used for both a ready-check timeout and a pre-start forfeit, i.e. any
    *  case where a full match could never legitimately be played out. */
-  private cancelRoom(room: Room, reason: 'ready_timeout' | 'forfeit' = 'ready_timeout') {
+  private cancelRoom(room: Room, reason: 'ready_timeout' | 'forfeit' | 'admin_cancelled' = 'ready_timeout') {
     if (room.status === 'finished' || room.status === 'cancelled') return;
     room.status = 'cancelled';
     room.clearTimers();
@@ -366,6 +369,24 @@ export class RoomManager {
       this.io.to(player.socketId).emit('room:update', toRoomPublic(room, player.userId));
     }
 
+    recordMatch({
+      roomId: room.id,
+      gameKind: room.gameKind,
+      format: room.format,
+      entryFee: room.entryFee,
+      pool: room.pool,
+      platformCut: 0,
+      playerCount: room.players.size,
+      status: 'cancelled',
+      endedBy: null,
+      isVoidMatch: true,
+      isDraw: false,
+      startedAt: room.matchStartedAt,
+      endedAt: Date.now(),
+      playerIds: [...room.players.keys()],
+      winnerIds: [],
+    });
+
     setTimeout(() => {
       for (const p of room.players.values()) {
         if (this.activeRoomByUser.get(p.userId) === room.id) this.activeRoomByUser.delete(p.userId);
@@ -376,7 +397,7 @@ export class RoomManager {
 
   private enterReadyCheck(room: Room) {
     room.status = 'ready_check';
-    const timeoutMs = getLobbyReadyTimeoutMs();
+    const timeoutMs = getEffectiveGameConfig().lobbyReadyTimeoutMs;
     room.readyDeadline = Date.now() + timeoutMs;
     for (const player of room.players.values()) {
       this.io.to(player.socketId).emit('match:found', toRoomPublic(room, player.userId));
@@ -404,7 +425,7 @@ export class RoomManager {
   private startCountdown(room: Room) {
     room.clearTimers(); // cancel the ready-check timeout — everyone is in, no need for it
     room.status = 'starting';
-    const readyCountdownMs = getReadyCountdownMs();
+    const readyCountdownMs = getEffectiveGameConfig().readyCountdownMs;
     room.startsAt = Date.now() + readyCountdownMs;
     this.broadcastRoom(room);
     const timer = setTimeout(() => this.startMatch(room), readyCountdownMs);
@@ -413,7 +434,8 @@ export class RoomManager {
 
   private startMatch(room: Room) {
     room.status = 'active';
-    const matchDurationMs = getMatchDurationMs();
+    room.matchStartedAt = Date.now();
+    const matchDurationMs = getEffectiveGameConfig().matchDurationMs;
     room.matchEndsAt = Date.now() + matchDurationMs;
     this.broadcastRoom(room);
 
@@ -451,8 +473,8 @@ export class RoomManager {
 
     const generated = generateRound(room.gameKind);
     const roundId = newRoundToken();
-    const memorizeMs = getRoundMemorizeMs();
-    const answerMs = getRoundAnswerMs();
+    const memorizeMs = getEffectiveGameConfig().roundMemorizeMs;
+    const answerMs = getEffectiveGameConfig().roundAnswerMs;
     const dispatchedAt = Date.now();
     const revealDeadline = dispatchedAt + memorizeMs;
 
@@ -510,10 +532,11 @@ export class RoomManager {
     if (round.resolved || player.activeRound !== round) return;
     round.resolved = true;
 
-    player.score -= 1;
+    player.score += getEffectiveGameConfig().wrongPenaltyDelta;
     player.wrong += 1;
     player.lastAnswerAt = Date.now();
     player.activeRound = null;
+    recordEvent('roundTimeout', player.userId);
 
     const timeoutPayload: RoundTimeoutPublic = { roundId: round.roundId, correctToken: round.correctToken, score: player.score };
     this.io.to(player.socketId).emit('match:round:timeout', timeoutPayload);
@@ -533,19 +556,26 @@ export class RoomManager {
     const room = this.rooms.get(roomId);
     if (!room || room.status !== 'active') throw new Error('Match is not live');
     const player = room.players.get(userId);
-    if (!player || player.connectionState !== 'connected') throw new RoomAuthorizationError('Player not in an active match');
+    if (!player || player.connectionState !== 'connected') {
+      recordEvent('nonMemberAnswerAttempt', userId);
+      throw new RoomAuthorizationError('Player not in an active match');
+    }
 
     const round = player.activeRound;
     if (!round || round.roundId !== roundId) {
       // Covers stale rounds, future/guessed round ids, and answering after the round was
       // already superseded — none of these can ever be treated as "the current round".
+      recordEvent('staleRoundRejected', userId);
       throw new Error('Stale or unknown round');
     }
     if (round.resolved) throw new Error('Round already answered');
     if (round.phase !== 'answer') throw new Error('Options have not been revealed yet');
 
     const now = Date.now();
-    if (now < round.minAnswerAt) throw new Error('Answer rejected: submitted faster than humanly possible');
+    if (now < round.minAnswerAt) {
+      recordEvent('tooFastRejected', userId);
+      throw new Error('Answer rejected: submitted faster than humanly possible');
+    }
     if (now > round.answerDeadline) throw new Error('Round expired');
     if (room.matchEndsAt !== null && now >= room.matchEndsAt) throw new Error('Match has already ended');
 
@@ -555,15 +585,17 @@ export class RoomManager {
     if (round.expireTimer) clearTimeout(round.expireTimer);
     player.activeRound = null;
 
+    const config = getEffectiveGameConfig();
     const correct = optionToken === round.correctToken;
     if (correct) {
-      player.score += 1;
+      player.score += config.correctScoreDelta;
       player.correct += 1;
     } else {
-      player.score -= 1;
+      player.score += config.wrongPenaltyDelta;
       player.wrong += 1;
     }
     player.lastAnswerAt = now;
+    recordEvent('answerSubmitted', userId);
 
     this.broadcastRoom(room);
     this.startRound(room, player);
@@ -571,13 +603,13 @@ export class RoomManager {
     return { correct, correctToken: round.correctToken, score: player.score };
   }
 
-  private endMatch(room: Room, endedBy: 'timer' | 'forfeit') {
+  private endMatch(room: Room, endedBy: 'timer' | 'forfeit' | 'admin_cancelled') {
     if (room.status === 'finished' || room.status === 'cancelled') return;
     room.status = 'finished';
     room.clearTimers();
 
     const players = [...room.players.values()];
-    const { ranked, isVoidMatch, isDraw, winnerIds, platformCut, winnerPayoutTotal, payoutByUserId } = computeMatchPayout(
+    const computed = computeMatchPayout(
       room.pool,
       players.map((p) => ({
         userId: p.userId,
@@ -589,6 +621,17 @@ export class RoomManager {
       })),
       room.winnerCount,
     );
+    // An admin force-closing a broken/stuck match is ALWAYS treated as a full void/refund,
+    // never a computed winner — this is what makes "admin picks a winner by force-ending at
+    // a convenient moment" structurally impossible rather than merely discouraged. There is
+    // no code path anywhere in this file that lets an admin action result in a payout.
+    const isVoidMatch = endedBy === 'admin_cancelled' ? true : computed.isVoidMatch;
+    const isDraw = endedBy === 'admin_cancelled' ? false : computed.isDraw;
+    const winnerIds = endedBy === 'admin_cancelled' ? new Set<string>() : computed.winnerIds;
+    const platformCut = endedBy === 'admin_cancelled' ? 0 : computed.platformCut;
+    const winnerPayoutTotal = endedBy === 'admin_cancelled' ? 0 : computed.winnerPayoutTotal;
+    const payoutByUserId = endedBy === 'admin_cancelled' ? new Map<string, number>() : computed.payoutByUserId;
+    const ranked = computed.ranked;
     const shouldRefund = isVoidMatch || isDraw;
 
     if (room.pool > 0 && !shouldRefund) {
@@ -645,6 +688,24 @@ export class RoomManager {
       if (player.connectionState !== 'forfeited') this.io.to(player.socketId).emit('match:end', payload);
     }
 
+    recordMatch({
+      roomId: room.id,
+      gameKind: room.gameKind,
+      format: room.format,
+      entryFee: room.entryFee,
+      pool: room.pool,
+      platformCut,
+      playerCount: room.players.size,
+      status: 'finished',
+      endedBy,
+      isVoidMatch,
+      isDraw,
+      startedAt: room.matchStartedAt,
+      endedAt: Date.now(),
+      playerIds: [...room.players.keys()],
+      winnerIds: [...winnerIds],
+    });
+
     // Keep the finished room around briefly for late joiners/reconnects/rematch requests
     // to read state, then drop it and forget every player's association with it.
     setTimeout(() => {
@@ -654,7 +715,118 @@ export class RoomManager {
       this.rooms.delete(room.id);
     }, 30_000);
   }
+
+  // ---------------------------------------------------------------------------
+  // Admin-only read/moderation surface (see admin/rooms.ts, which is the only caller —
+  // itself gated behind admin auth + the `rooms.view`/`rooms.moderate` permissions). These
+  // never accept a client-supplied player identity, correctness, or score — they only ever
+  // read the server's own authoritative room state, or force a room out of a broken/stuck
+  // state via the exact same cancel/void code paths normal gameplay already uses.
+  // ---------------------------------------------------------------------------
+
+  /** Every room this process currently holds in memory (including ones that just finished
+   *  or were cancelled but haven't been purged yet — see the 10s/30s cleanup timers above).
+   *  Player identity is the room-scoped `publicId` for every occupant, deliberately never
+   *  the real account id, for the same "don't expose private player information
+   *  unnecessarily" reason player-facing broadcasts already redact it. */
+  listRoomsAdmin(): AdminRoomSummary[] {
+    return [...this.rooms.values()].map((r) => this.toAdminSummary(r));
+  }
+
+  private toAdminSummary(r: Room): AdminRoomSummary {
+    return {
+      id: r.id,
+      gameKind: r.gameKind,
+      format: r.format,
+      entryFee: r.entryFee,
+      status: r.status,
+      playerCount: r.players.size,
+      maxPlayers: r.maxPlayers,
+      pool: r.pool,
+      createdAt: r.createdAt,
+      matchStartedAt: r.matchStartedAt,
+      matchEndsAt: r.matchEndsAt,
+      readyDeadline: r.readyDeadline,
+      startsAt: r.startsAt,
+    };
+  }
+
+  getRoomAdminDetail(roomId: string): AdminRoomDetail | null {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    return {
+      ...this.toAdminSummary(room),
+      players: [...room.players.values()].map((p) => ({
+        id: p.publicId,
+        name: p.name,
+        ready: p.ready,
+        score: p.score,
+        correct: p.correct,
+        wrong: p.wrong,
+        connectionState: p.connectionState,
+        hasActiveRound: p.activeRound !== null,
+        activeRoundPhase: p.activeRound?.phase ?? null,
+        lastAnswerAt: p.lastAnswerAt,
+      })),
+    };
+  }
+
+  /** Force-closes a room stuck in any pre-active or active state. Pre-active statuses use
+   *  exactly the existing cancel-and-refund path; an active match is always ended as a full
+   *  void/refund (see endMatch's admin_cancelled handling) — there is deliberately no way
+   *  for this method to produce a winner or touch any player's score. */
+  adminCancelRoom(roomId: string): { ok: boolean; message: string } {
+    const room = this.rooms.get(roomId);
+    if (!room) return { ok: false, message: 'Room not found (it may have already been cleaned up)' };
+    if (room.status === 'finished' || room.status === 'cancelled') {
+      return { ok: false, message: `Room is already ${room.status}` };
+    }
+    if (room.status === 'queued') {
+      for (const player of [...room.players.values()]) this.leaveRoom(room.id, player.userId);
+      return { ok: true, message: 'Queued room cleared and every seated player refunded' };
+    }
+    if (room.status === 'ready_check' || room.status === 'starting') {
+      this.cancelRoom(room, 'admin_cancelled');
+      return { ok: true, message: 'Lobby cancelled and every seated player refunded' };
+    }
+    // active
+    this.endMatch(room, 'admin_cancelled');
+    return { ok: true, message: 'Match force-closed as a void match — every entry fee refunded, no winner declared' };
+  }
 }
 
 export { InsufficientFundsError };
 export type { PlayerConnectionState };
+
+export interface AdminRoomSummary {
+  id: string;
+  gameKind: GameKind;
+  format: RoomFormat;
+  entryFee: number;
+  status: RoomStatus;
+  playerCount: number;
+  maxPlayers: number;
+  pool: number;
+  createdAt: number;
+  matchStartedAt: number | null;
+  matchEndsAt: number | null;
+  readyDeadline: number | null;
+  startsAt: number | null;
+}
+
+export interface AdminRoomPlayerDetail {
+  id: string;
+  name: string;
+  ready: boolean;
+  score: number;
+  correct: number;
+  wrong: number;
+  connectionState: PlayerConnectionState;
+  hasActiveRound: boolean;
+  activeRoundPhase: 'reveal' | 'answer' | null;
+  lastAnswerAt: number | null;
+}
+
+export interface AdminRoomDetail extends AdminRoomSummary {
+  players: AdminRoomPlayerDetail[];
+}

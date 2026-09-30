@@ -1,0 +1,24 @@
+{
+  "name": "wager-arena-admin",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Wager Arena admin operations center — a SEPARATE application from the player-facing app (../src). Never import from ../src, and never import anything from here into the player app.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-router-dom": "^6.28.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@vitejs/plugin-react": "^6.1.1",
+    "typescript": "~6.0.2",
+    "vite": "^8.3.0"
+  }
+}

@@ -1,4 +1,5 @@
 import type { GeneratedRound } from '../types.js';
+import { activeAssetIds } from '../admin/gameContent.js';
 import { ASSET_MIRROR } from './assetMirror.js';
 import { newRoundToken, pickDistinct, shuffle } from './shared.js';
 
@@ -19,7 +20,15 @@ import { newRoundToken, pickDistinct, shuffle } from './shared.js';
  * ever holds the token↔correctness mapping.
  */
 export function generateMemoryMatch(): GeneratedRound {
-  const [target, ...distractors] = pickDistinct(ASSET_MIRROR, 4);
+  // Only ever draws from admin-enabled assets (see ../admin/gameContent.ts) — an asset an
+  // operator has disabled can never appear as either the target or a distractor. Falls back
+  // to the full mirror if, somehow, fewer than 5 assets are active (setAssetActive() itself
+  // already refuses to let that happen through the admin API, but a round must never crash
+  // the match for a player over a content-management edge case).
+  const active = activeAssetIds();
+  const pool = ASSET_MIRROR.filter((a) => active.has(a.id));
+  const source = pool.length >= 5 ? pool : ASSET_MIRROR;
+  const [target, ...distractors] = pickDistinct(source, 4);
   if (!target) throw new Error('Not enough assets to generate a memory match round');
 
   const candidates = shuffle([target, ...distractors]);

@@ -12,8 +12,10 @@ dist
 dist-ssr
 *.local
 
-# Backend runtime data (wallets/ledger) — never committed, regenerated on first run
+# Backend runtime data (wallets/ledger, admin accounts/audit log) — never committed,
+# regenerated on first run
 server/data/store.json
+server/data/admin-store.json
 *.tsbuildinfo
 
 # Editor directories and files

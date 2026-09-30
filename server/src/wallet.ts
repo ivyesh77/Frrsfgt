@@ -28,6 +28,12 @@ export class UsernameTakenError extends Error {
   }
 }
 
+export class AccountSuspendedError extends Error {
+  constructor(status: 'suspended' | 'banned') {
+    super(status === 'banned' ? 'This account has been banned.' : 'This account is temporarily suspended.');
+  }
+}
+
 /** The only shape ever allowed to leave the server — strips `passwordHash` and
  *  `usernameKey`. Every route must funnel its response through this. */
 export function toPublicUser(user: User): PublicUser {
@@ -54,6 +60,7 @@ export async function registerUser(name: string, password: string): Promise<User
     passwordHash,
     walletBalance: STARTING_WALLET_BALANCE,
     createdAt: Date.now(),
+    status: 'active',
   };
   upsertUser(user);
   recordTransaction({
@@ -84,6 +91,10 @@ export async function authenticateUser(name: string, password: string): Promise<
   }
   const ok = await verifyPassword(password, user.passwordHash);
   if (!ok) throw new InvalidCredentialsError();
+  // Checked only AFTER a successful password match — a wrong-password attempt against a
+  // banned account must look identical to a wrong-password attempt against any other
+  // account, never leaking account status to someone who doesn't already know the password.
+  if (user.status !== 'active') throw new AccountSuspendedError(user.status);
   return user;
 }
 
@@ -187,6 +198,20 @@ export function refundEntryFee(userId: string, amount: number, roomId: string): 
 
 export function creditPayout(userId: string, amount: number, roomId: string): User {
   return applyDelta(userId, 'payout', amount, roomId);
+}
+
+/**
+ * The ONLY function anywhere in this codebase that lets an operator directly change a
+ * user's balance outside of normal gameplay/deposit/withdraw flow — see
+ * admin/server.ts POST /admin/wallets/:userId/adjustment, which is the sole caller and is
+ * itself gated behind admin auth + the `wallet.adjust` permission + a mandatory reason +
+ * a second-approval requirement above a threshold, with every call producing an audit
+ * entry. This deliberately records its own distinct `admin_adjustment` transaction type
+ * (never reusing `entry_fee`/`payout`/`topup`) so it can never be miscounted as a real
+ * wager, deposit, or match payout in `getWalletStats()` / analytics. */
+export function adminAdjustBalance(userId: string, amount: number, direction: 'credit' | 'debit', reference: string): User {
+  const signedAmount = direction === 'credit' ? Math.abs(amount) : -Math.abs(amount);
+  return applyDelta(userId, 'admin_adjustment', signedAmount, reference);
 }
 
 export function recentTransactions(userId: string): Transaction[] {
