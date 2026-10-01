@@ -7,8 +7,9 @@
     "dev": "tsx watch --exclude \"data/**\" src/index.ts",
     "start": "tsx src/index.ts",
     "test": "tsx src/selftest.ts",
+    "test:payments": "tsx src/paymentSelftest.ts",
     "test:admin": "tsx src/adminSelftest.ts",
-    "test:all": "npm run test && npm run test:admin"
+    "test:all": "npm run test && npm run test:payments && npm run test:admin"
   },
   "dependencies": {
     "cookie-parser": "^1.4.7",

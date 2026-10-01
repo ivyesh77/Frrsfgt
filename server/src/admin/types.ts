@@ -60,7 +60,13 @@ export const PERMISSIONS = [
   'wallet.adjust', // audited balance adjustment
   'transactions.view',
   'payments.view',
-  'payments.edit', // provider/UPI/crypto config
+  'payments.edit', // legacy UI aliases retained for compatibility
+  'PAYMENT_VIEW',
+  'PAYMENT_CONFIG',
+  'PAYMENT_OPERATE',
+  'PAYMENT_RECONCILE',
+  'PAYMENT_ADJUST',
+  'PAYMENT_ADMIN',
   'webhooks.view',
   'webhooks.retry',
   'reconciliation.view',
@@ -108,6 +114,10 @@ export const ROLE_PERMISSIONS: Record<AdminRole, readonly Permission[]> = {
     'transactions.view',
     'payments.view',
     'payments.edit',
+    'PAYMENT_VIEW',
+    'PAYMENT_CONFIG',
+    'PAYMENT_OPERATE',
+    'PAYMENT_RECONCILE',
     'webhooks.view',
     'webhooks.retry',
     'reconciliation.view',
@@ -135,6 +145,7 @@ export const ROLE_PERMISSIONS: Record<AdminRole, readonly Permission[]> = {
     'wallet.view',
     'transactions.view',
     'payments.view',
+    'PAYMENT_VIEW',
     'webhooks.view',
     'reconciliation.view',
     'risk.view',

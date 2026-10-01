@@ -161,6 +161,9 @@ async function main() {
   );
 
   // PAYMENT_OPERATOR: can view/edit payments and wallets, but NOT game config or admin accounts
+  assert((await adminJson(paymentOpToken, '/admin/payment-adapters')).status === 200, 'PAYMENT_OPERATOR can view the payment adapter registry');
+  assert((await adminJson(paymentOpToken, '/admin/payment-config')).status === 200, 'PAYMENT_OPERATOR can view payment routing configuration');
+  assert((await adminJson(readOnlyToken, '/admin/payment-adapters/PAY-01')).status === 200, 'READ_ONLY can view a payment adapter through the server permission boundary');
   assert((await adminJson(paymentOpToken, '/admin/payments/upi')).status === 200, 'PAYMENT_OPERATOR can view UPI config');
   assert(
     (await adminJson(paymentOpToken, '/admin/game/config', { method: 'PUT', body: JSON.stringify({ patch: { matchDurationMs: 30000 }, reason: 'x' }) })).status === 403,

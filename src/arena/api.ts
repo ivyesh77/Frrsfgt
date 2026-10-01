@@ -6,6 +6,7 @@ import type {
   NotificationEntry,
   PaginatedMatchHistory,
   PaginatedNotifications,
+  PlayerPaymentTransaction,
   PlayerStats,
   PublicPaymentMethods,
   RoomSummary,
@@ -295,6 +296,36 @@ export async function markAllNotificationsRead(): Promise<number> {
 export async function fetchPaymentMethods(): Promise<PublicPaymentMethods> {
   const res = await apiFetch('/api/payment-methods');
   return parseOrThrow(res);
+}
+
+export async function fetchPaymentTransactionMethods(): Promise<{ methods: NonNullable<PublicPaymentMethods['methods']>; note: string }> {
+  const res = await apiFetch('/api/payments/methods');
+  return parseOrThrow(res);
+}
+
+export async function createPaymentDeposit(input: { amount: number; method: 'UPI' | 'CRYPTO'; currency: 'INR' | 'USDT'; idempotencyKey: string; asset?: string; network?: string }): Promise<PlayerPaymentTransaction> {
+  const res = await apiFetch('/api/payments/deposits', { method: 'POST', headers: { 'Idempotency-Key': input.idempotencyKey }, body: JSON.stringify(input) });
+  const body = await parseOrThrow<{ transaction: PlayerPaymentTransaction }>(res);
+  return body.transaction;
+}
+
+export async function createPaymentWithdrawal(input: { amount: number; method: 'UPI' | 'CRYPTO'; currency: 'INR' | 'USDT'; idempotencyKey: string; destination: string; asset?: string; network?: string }): Promise<PlayerPaymentTransaction> {
+  const res = await apiFetch('/api/payments/withdrawals', { method: 'POST', headers: { 'Idempotency-Key': input.idempotencyKey }, body: JSON.stringify(input) });
+  const body = await parseOrThrow<{ transaction: PlayerPaymentTransaction }>(res);
+  return body.transaction;
+}
+
+export async function fetchPaymentTransactions(operation?: 'DEPOSIT' | 'WITHDRAWAL'): Promise<PlayerPaymentTransaction[]> {
+  const query = operation ? `?operation=${operation}` : '';
+  const res = await apiFetch(`/api/payments/transactions${query}`);
+  const body = await parseOrThrow<{ transactions: PlayerPaymentTransaction[] }>(res);
+  return body.transactions;
+}
+
+export async function fetchPaymentTransaction(id: string): Promise<PlayerPaymentTransaction> {
+  const res = await apiFetch(`/api/payments/transactions/${encodeURIComponent(id)}`);
+  const body = await parseOrThrow<{ transaction: PlayerPaymentTransaction }>(res);
+  return body.transaction;
 }
 
 export async function fetchSupportTickets(): Promise<SupportTicket[]> {

@@ -48,7 +48,8 @@ export class ApiError extends Error {
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body !== undefined && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
-  if (bearerToken) headers.set('Authorization', `Bearer ${bearerToken}`);
+  const activeBearerToken = readStoredAdminBearerToken() ?? bearerToken;
+  if (activeBearerToken) headers.set('Authorization', `Bearer ${activeBearerToken}`);
   const res = await fetch(path, { ...init, headers, credentials: 'include' });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new ApiError(body?.error ?? `Request failed (${res.status})`, res.status);

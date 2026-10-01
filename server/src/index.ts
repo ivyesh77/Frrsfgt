@@ -30,9 +30,13 @@ import { appendLoginAttempt } from './admin/store.js';
 import { getEffectiveFlags } from './admin/flags.js';
 import { isUnderMaintenance, getMaintenanceMessage } from './admin/maintenance.js';
 import { recordEvent } from './admin/signals.js';
-import { publicPaymentMethodsView } from './admin/payments.js';
+
 import { createPlayerTicket, ticketForUser, ticketsForUser } from './admin/support.js';
 import type { SupportTicketCategory } from './admin/types.js';
+import { PaymentService } from './payments/service.js';
+import { processProviderWebhook } from './payments/webhooks.js';
+import { listPaymentMethodsForPlayer } from './payments/registry.js';
+import { type PaymentCurrency, type PaymentMethod } from './payments/types.js';
 import { getPlayerMatchDetail, getPlayerMatchHistory } from './playerHistory.js';
 import { computeAchievements, computePlayerStats } from './playerStats.js';
 import { listNotifications, markAllAsRead, markNotificationAsRead, unreadNotificationCount } from './notifications.js';
@@ -94,7 +98,12 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
-app.use(express.json());
+app.use(express.json({
+  limit: '1mb',
+  verify: (req, _res, buffer) => {
+    (req as Request).rawBody = buffer.toString('utf8');
+  },
+}));
 app.use(cookieParser());
 
 const httpServer = createServer(app);
@@ -269,10 +278,70 @@ const loginLimiter = rateLimit({
 });
 // Financial mutations get a stricter limiter than ordinary reads.
 const walletWriteLimiter = rateLimit({ windowMs: 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false, handler: jsonRateLimitHandler });
+const paymentStatusLimiter = rateLimit({ windowMs: 60 * 1000, limit: 60, standardHeaders: true, legacyHeaders: false, handler: jsonRateLimitHandler });
+const paymentWebhookLimiter = rateLimit({ windowMs: 60 * 1000, limit: 120, standardHeaders: true, legacyHeaders: false, handler: jsonRateLimitHandler });
 const walletReadLimiter = rateLimit({ windowMs: 60 * 1000, limit: 60, standardHeaders: true, legacyHeaders: false, handler: jsonRateLimitHandler });
+
+const paymentService = new PaymentService();
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, gameKinds: GAME_KINDS, entryFees: ENTRY_FEE_TIERS, formats: ROOM_FORMATS });
+});
+
+// ---------------------------------------------------------------------------
+// Payments: the player may request a payment, but only this service can route, call an
+// adapter, accept a verified provider event, and settle the existing wallet ledger.
+// ---------------------------------------------------------------------------
+app.get('/api/payments/methods', requireAuth, paymentStatusLimiter, (_req, res) => {
+  res.json({ methods: listPaymentMethodsForPlayer(), note: 'Only TEST/SANDBOX adapters are exposed in this build; no real money is accepted.' });
+});
+
+app.post('/api/payments/webhooks/:provider', paymentWebhookLimiter, async (req, res) => {
+  const rawBody = req.rawBody ?? JSON.stringify(req.body ?? {});
+  const signature = typeof req.headers['x-payment-signature'] === 'string' ? req.headers['x-payment-signature'] : undefined;
+  try {
+    const result = await processProviderWebhook(req.params.provider ?? '', rawBody, signature);
+    res.status(result.duplicate ? 200 : 202).json({ ok: true, duplicate: result.duplicate, eventId: result.eventId, message: result.message });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Webhook rejected';
+    const status = message.includes('signature') ? 401 : message.includes('not found') ? 404 : 400;
+    res.status(status).json({ error: message });
+  }
+});
+
+app.post('/api/payments/deposits', requireAuth, walletWriteLimiter, async (req, res) => {
+  const requestId = typeof req.headers['x-request-id'] === 'string' ? req.headers['x-request-id'] : nanoid(12);
+  const idempotencyKey = typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'] : req.body?.idempotencyKey;
+  try {
+    const transaction = await paymentService.createDeposit(req.userId!, { amount: Number(req.body?.amount), method: String(req.body?.method ?? '').toUpperCase() as PaymentMethod, currency: String(req.body?.currency ?? '').toUpperCase() as PaymentCurrency, idempotencyKey: typeof idempotencyKey === 'string' ? idempotencyKey : '', asset: typeof req.body?.asset === 'string' ? req.body.asset : undefined, network: typeof req.body?.network === 'string' ? req.body.network : undefined, requestId });
+    res.status(201).json({ transaction });
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : 'Deposit request failed' });
+  }
+});
+
+app.post('/api/payments/withdrawals', requireAuth, walletWriteLimiter, async (req, res) => {
+  const requestId = typeof req.headers['x-request-id'] === 'string' ? req.headers['x-request-id'] : nanoid(12);
+  const idempotencyKey = typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'] : req.body?.idempotencyKey;
+  try {
+    const transaction = await paymentService.createWithdrawal(req.userId!, { amount: Number(req.body?.amount), method: String(req.body?.method ?? '').toUpperCase() as PaymentMethod, currency: String(req.body?.currency ?? '').toUpperCase() as PaymentCurrency, idempotencyKey: typeof idempotencyKey === 'string' ? idempotencyKey : '', destination: typeof req.body?.destination === 'string' ? req.body.destination : '', asset: typeof req.body?.asset === 'string' ? req.body.asset : undefined, network: typeof req.body?.network === 'string' ? req.body.network : undefined, requestId });
+    res.status(201).json({ transaction });
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : 'Withdrawal request failed' });
+  }
+});
+
+app.get('/api/payments/transactions', requireAuth, paymentStatusLimiter, (req, res) => {
+  const operation = req.query.operation === 'DEPOSIT' || req.query.operation === 'WITHDRAWAL' ? req.query.operation : undefined;
+  res.json({ transactions: paymentService.listPlayerTransactions(req.userId!, operation) });
+});
+
+app.get('/api/payments/transactions/:id', requireAuth, paymentStatusLimiter, async (req, res) => {
+  try {
+    res.json({ transaction: await paymentService.getPlayerTransaction(req.userId!, req.params.id ?? '') });
+  } catch (error) {
+    res.status(404).json({ error: error instanceof Error ? error.message : 'Payment transaction not found' });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -478,7 +547,14 @@ app.post('/api/notifications/read-all', requireAuth, walletWriteLimiter, (req, r
 // never an admin-only field (internal notes, which admin handled it, etc).
 // ---------------------------------------------------------------------------
 app.get('/api/payment-methods', requireAuth, walletReadLimiter, (_req, res) => {
-  res.json(publicPaymentMethodsView());
+  const methods = listPaymentMethodsForPlayer();
+  const upi = methods.find((method) => method.method === 'UPI');
+  res.json({
+    demoWallet: { available: true, note: 'Instant demo-currency deposits/withdrawals — practice coins only, never real money.' },
+    methods,
+    upi: upi ? { enabled: upi.depositEnabled || upi.withdrawalEnabled, minAmount: upi.minAmount, maxAmount: upi.maxAmount } : { enabled: false, minAmount: 0, maxAmount: 0 },
+    crypto: methods.filter((method) => method.method === 'CRYPTO').map((method) => ({ asset: method.asset ?? 'unknown', network: method.network ?? 'unknown', depositEnabled: method.depositEnabled, withdrawEnabled: method.withdrawalEnabled, minAmount: method.minAmount, maxAmount: method.maxAmount, confirmationsRequired: 0 })),
+  });
 });
 
 const SUPPORT_CATEGORIES: SupportTicketCategory[] = ['account', 'wallet', 'payment', 'gameplay', 'other'];
