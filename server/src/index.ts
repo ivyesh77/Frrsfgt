@@ -26,6 +26,7 @@ import {
   withdraw,
 } from './wallet.js';
 import { startAdminServer } from './admin/server.js';
+import { startOperatorServer } from './operator/server.js';
 import { appendLoginAttempt } from './admin/store.js';
 import { getEffectiveFlags } from './admin/flags.js';
 import { isUnderMaintenance, getMaintenanceMessage } from './admin/maintenance.js';
@@ -34,7 +35,9 @@ import { recordEvent } from './admin/signals.js';
 import { createPlayerTicket, ticketForUser, ticketsForUser } from './admin/support.js';
 import type { SupportTicketCategory } from './admin/types.js';
 import { PaymentService } from './payments/service.js';
+import { getPaymentTransaction } from './payments/store.js';
 import { processProviderWebhook } from './payments/webhooks.js';
+import { submitPaymentProof } from './payments/workflow.js';
 import { listPaymentMethodsForPlayer } from './payments/registry.js';
 import { type PaymentCurrency, type PaymentMethod } from './payments/types.js';
 import { getPlayerMatchDetail, getPlayerMatchHistory } from './playerHistory.js';
@@ -328,6 +331,17 @@ app.post('/api/payments/withdrawals', requireAuth, walletWriteLimiter, async (re
     res.status(201).json({ transaction });
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : 'Withdrawal request failed' });
+  }
+});
+
+app.post('/api/payments/deposits/:id/proof', requireAuth, walletWriteLimiter, async (req, res) => {
+  const transaction = getPaymentTransaction(req.params.id ?? '');
+  if (!transaction || transaction.userId !== req.userId || transaction.operation !== 'DEPOSIT') return res.status(404).json({ error: 'Payment transaction not found' });
+  try {
+    const updated = submitPaymentProof(transaction, { amount: Number(req.body?.amount), reference: typeof req.body?.reference === 'string' ? req.body.reference : '', paymentAt: Number(req.body?.paymentAt), evidenceReference: typeof req.body?.evidenceReference === 'string' ? req.body.evidenceReference : null });
+    res.status(202).json({ transaction: await paymentService.getPlayerTransaction(req.userId!, updated.id) });
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : 'Payment proof submission failed' });
   }
 });
 
@@ -774,5 +788,6 @@ httpServer.listen(PORT, () => {
 // doc-comment for the full reasoning. Set ADMIN_ALLOWED_ORIGIN to the admin web app's
 // actual origin before deploying this anywhere reachable by the public internet.
 const adminServer = startAdminServer({ roomManager, io }, ADMIN_PORT);
+const operatorServer = startOperatorServer({ port: Number(process.env.OPERATOR_PORT) || 8789 });
 
-export { app, httpServer, io, PORT, ADMIN_PORT, adminServer };
+export { app, httpServer, io, PORT, ADMIN_PORT, adminServer, operatorServer };

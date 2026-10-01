@@ -9,7 +9,8 @@
     "test": "tsx src/selftest.ts",
     "test:payments": "tsx src/paymentSelftest.ts",
     "test:admin": "tsx src/adminSelftest.ts",
-    "test:all": "npm run test && npm run test:payments && npm run test:admin"
+    "test:operator": "tsx src/operatorSelftest.ts",
+    "test:all": "npm run test && npm run test:payments && npm run test:admin && npm run test:operator"
   },
   "dependencies": {
     "cookie-parser": "^1.4.7",

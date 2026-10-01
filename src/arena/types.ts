@@ -468,6 +468,9 @@ export interface PlayerPaymentTransaction {
   completedAt: number | null;
   failureReason: string | null;
   verifiedAt: number | null;
+  workflowStatus?: 'AWAITING_PAYMENT' | 'PAYMENT_SUBMITTED' | 'AWAITING_VERIFICATION' | 'UNDER_REVIEW' | 'VERIFIED' | 'REJECTED' | 'EXPIRED' | 'CANCELLED' | 'PROCESSING' | 'CONFIRMED';
+  workflowUpdatedAt?: number;
+  proof?: { amount: number; reference: string; paymentAt: number; evidenceReference?: string | null; submittedAt: number } | null;
 }
 
 // ---------------------------------------------------------------------------

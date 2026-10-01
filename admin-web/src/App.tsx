@@ -14,6 +14,7 @@ import { ProvidersPage } from './pages/Providers';
 import { PaymentOverviewPage } from './pages/PaymentOverview';
 import { PaymentAdaptersPage } from './pages/PaymentAdapters';
 import { PaymentConfigPage } from './pages/PaymentConfig';
+import { PaymentOperatorsPage } from './pages/PaymentOperators';
 import { PaymentTransactionsPage } from './pages/PaymentTransactions';
 import { PaymentReconciliationPage } from './pages/PaymentReconciliation';
 import { UpiPage } from './pages/Upi';
@@ -71,6 +72,7 @@ const NAV: NavGroup[] = [
       { to: '/payment-operations', label: 'Payment Operations', permission: 'PAYMENT_VIEW' },
       { to: '/payment-adapters', label: 'Payment Accounts', permission: 'PAYMENT_VIEW' },
       { to: '/payment-config', label: 'Routing & Limits', permission: 'PAYMENT_VIEW' },
+      { to: '/payment-operators', label: 'Payment Operators', permission: 'PAYMENT_OPERATOR_ADMIN' },
       { to: '/payment-transactions', label: 'Payment Transactions', permission: 'PAYMENT_VIEW' },
       { to: '/payment-reconciliation', label: 'Payment Reconciliation', permission: 'PAYMENT_VIEW' },
       { to: '/providers', label: 'Legacy Provider Config', permission: 'payments.view' },
@@ -201,6 +203,7 @@ export function App() {
             <Route path="/payment-operations" element={<RequirePermission permission="PAYMENT_VIEW"><PaymentOverviewPage /></RequirePermission>} />
             <Route path="/payment-adapters" element={<RequirePermission permission="PAYMENT_VIEW"><PaymentAdaptersPage /></RequirePermission>} />
             <Route path="/payment-config" element={<RequirePermission permission="PAYMENT_VIEW"><PaymentConfigPage /></RequirePermission>} />
+            <Route path="/payment-operators" element={<RequirePermission permission="PAYMENT_OPERATOR_ADMIN"><PaymentOperatorsPage /></RequirePermission>} />
             <Route path="/payment-transactions" element={<RequirePermission permission="PAYMENT_VIEW"><PaymentTransactionsPage /></RequirePermission>} />
             <Route path="/payment-reconciliation" element={<RequirePermission permission="PAYMENT_VIEW"><PaymentReconciliationPage /></RequirePermission>} />
             <Route path="/providers" element={<RequirePermission permission="payments.view"><ProvidersPage /></RequirePermission>} />

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { nanoid } from 'nanoid';
 import { getUser } from '../store.js';
-import { addPaymentAudit, addRiskSignal, addProviderEvent, decrementAdapterPending, findPaymentByIdempotency, findPaymentByProviderReference, findProviderEvent, getPaymentAdapter, getPaymentConfig, getPaymentTransaction, listPaymentTransactions, recordAdapterTransaction, updatePaymentTransaction, updateProviderEvent } from './store.js';
+import { addPaymentAudit, addRiskSignal, addProviderEvent, decrementAdapterPending, findPaymentByAnyReference, findPaymentByIdempotency, findPaymentByProviderReference, findProviderEvent, getPaymentAdapter, getPaymentConfig, getPaymentTransaction, listPaymentTransactions, recordAdapterTransaction, updatePaymentTransaction, updateProviderEvent } from './store.js';
 import { adapterForProvider } from './adapters.js';
 import { resolvePaymentSecret } from './secrets.js';
 import { routePayment } from './routing.js';
@@ -93,6 +93,7 @@ export class PaymentService {
     let transaction = createPaymentTransaction({ id: transactionId, userId, operation: 'DEPOSIT', method: input.method, currency: input.currency, amount: input.amount, fees, status: 'CREATED', adapterId: route.adapter.adapterId, provider: route.adapter.provider, environment: route.adapter.environment, clientIdempotencyKey: input.idempotencyKey, providerReference: null, destinationMasked: null, asset: input.asset ?? null, network: input.network ?? null, txHash: null, confirmations: null, instructions: null, failureReason: null, verifiedAt: null, correlationId: input.requestId });
     try {
       const result = await this.callDepositAdapter(input, route.adapter);
+      if (!result.providerReference || findPaymentByAnyReference(result.providerReference)) throw new Error('Provider reference is missing or already assigned');
       const nextStatus = statusFromProvider(result);
       const updatedFees = calculateFees('DEPOSIT', input.amount, result.providerFee, result.networkFee, getPaymentConfig().platformFeeBps, 0);
       transaction = updatePaymentTransaction(transaction.id, { providerReference: result.providerReference, instructions: result.instructions, fees: updatedFees, failureReason: result.failureReason ?? null }) ?? transaction;
@@ -131,6 +132,7 @@ export class PaymentService {
     try {
       transaction = reserveDepositlessWithdrawal(transaction);
       const result = await this.callWithdrawalAdapter(input, route.adapter);
+      if (!result.providerReference || findPaymentByAnyReference(result.providerReference)) throw new Error('Provider reference is missing or already assigned');
       const nextStatus = statusFromProvider(result);
       const updatedFees = calculateFees('WITHDRAWAL', input.amount, result.providerFee, result.networkFee, getPaymentConfig().platformFeeBps, getPaymentConfig().withdrawalFeeFlat);
       transaction = updatePaymentTransaction(transaction.id, { providerReference: result.providerReference, instructions: result.instructions, fees: updatedFees, failureReason: result.failureReason ?? null }) ?? transaction;

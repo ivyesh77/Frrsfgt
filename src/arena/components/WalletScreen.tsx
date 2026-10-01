@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Button } from '../../components/common/Button';
-import { createPaymentDeposit, createPaymentWithdrawal, fetchPaymentMethods, fetchPaymentTransactions, fetchWalletDetail } from '../api';
+import { createPaymentDeposit, createPaymentWithdrawal, fetchPaymentMethods, fetchPaymentTransactions, fetchWalletDetail, submitPaymentProof } from '../api';
 import { sounds } from '../sound';
 import { haptics } from '../haptics';
 import { coinWalletId, TRANSACTION_LABELS, type ArenaUser, type PlayerPaymentTransaction, type PublicPaymentMethod, type PublicPaymentMethods, type Transaction } from '../types';
@@ -237,8 +237,35 @@ function PaymentMethodsPanel({ methods, loading }: { methods: PublicPaymentMetho
   return <section className="wallet-methods-grid"><div className="wallet-method-card glass-panel"><h3>🪙 Demo Wallet</h3><p>{methods?.demoWallet.note ?? 'Practice currency only.'}</p><span className="wallet-method-card__status wallet-method-card__status--on">Available</span></div>{rails.length === 0 && <p className="arena-empty">No TEST/SANDBOX payment rails are enabled.</p>}{rails.map((rail, index) => <motion.div key={`${rail.method}-${rail.currency}-${rail.network}-${index}`} className="wallet-method-card glass-panel" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}><h3>{rail.method === 'UPI' ? '📲 UPI' : '₿ Crypto'} · {rail.currency}</h3><p>{rail.asset && rail.network ? `${rail.asset} on ${rail.network}` : 'Server-configured payment rail'}</p><p className="arena-fineprint">{rail.environment} · limits {rail.minAmount.toLocaleString()}–{rail.maxAmount.toLocaleString()}</p><span className="wallet-method-card__status wallet-method-card__status--on">{rail.depositEnabled || rail.withdrawalEnabled ? 'Enabled' : 'Disabled'}</span></motion.div>)}</section>;
 }
 
+function paymentDateInputValue(timestamp = Date.now()): string {
+  const date = new Date(timestamp - new Date(timestamp).getTimezoneOffset() * 60_000);
+  return date.toISOString().slice(0, 16);
+}
+
 function PaymentTxRow({ transaction }: { transaction: PlayerPaymentTransaction }) {
-  return <article className="wallet-tx glass-panel"><div className="wallet-tx__main"><span className="wallet-tx__type">{transaction.operation === 'DEPOSIT' ? 'Deposit' : 'Withdrawal'} · {transaction.method}</span><span className="wallet-tx__time">{transaction.id} · {formatTime(transaction.createdAt)}</span></div><div className="wallet-tx__side"><span className={`wallet-tx__amount ${paymentStatusClass(transaction.status)}`}>{paymentStatusLabel(transaction.status)}</span><span className="wallet-tx__balance">{transaction.currency} {transaction.amount.toLocaleString()}</span></div>{transaction.failureReason && <p className="arena-fineprint arena-fineprint--warn">{transaction.failureReason}</p>}{transaction.instructions && transaction.status !== 'COMPLETED' && <p className="arena-fineprint">{transaction.instructions.label}: {transaction.instructions.value}</p>}</article>;
+  const [updated, setUpdated] = useState<PlayerPaymentTransaction | null>(null);
+  const [reference, setReference] = useState('');
+  const [paymentAt, setPaymentAt] = useState(paymentDateInputValue());
+  const [evidenceReference, setEvidenceReference] = useState('');
+  const [proofBusy, setProofBusy] = useState(false);
+  const [proofError, setProofError] = useState<string | null>(null);
+  const current = updated ?? transaction;
+  const proofAllowed = current.operation === 'DEPOSIT' && !current.proof && !['COMPLETED', 'FAILED', 'EXPIRED', 'CANCELLED', 'REVERSED'].includes(current.status) && current.workflowStatus !== 'VERIFIED';
+  async function sendProof() {
+    setProofBusy(true); setProofError(null);
+    try {
+      const submittedAt = Date.parse(paymentAt);
+      if (!Number.isSafeInteger(submittedAt)) throw new Error('Choose the date and time of payment');
+      const result = await submitPaymentProof(current.id, { amount: current.amount, reference, paymentAt: submittedAt, evidenceReference: evidenceReference || undefined });
+      setUpdated(result);
+      setReference('');
+      setPaymentAt(paymentDateInputValue());
+      setEvidenceReference('');
+    } catch (error) {
+      setProofError(error instanceof Error ? error.message : 'Proof submission failed');
+    } finally { setProofBusy(false); }
+  }
+  return <article className="wallet-tx glass-panel"><div className="wallet-tx__main"><span className="wallet-tx__type">{current.operation === 'DEPOSIT' ? 'Deposit' : 'Withdrawal'} · {current.method}</span><span className="wallet-tx__time">{current.id} · {formatTime(current.createdAt)}</span></div><div className="wallet-tx__side"><span className={`wallet-tx__amount ${paymentStatusClass(current.status)}`}>{paymentStatusLabel(current.status)}</span><span className="wallet-tx__balance">{current.currency} {current.amount.toLocaleString()}</span></div>{current.failureReason && <p className="arena-fineprint arena-fineprint--warn">{current.failureReason}</p>}{current.instructions && current.status !== 'COMPLETED' && <p className="arena-fineprint">{current.instructions.label}: {current.instructions.value}</p>}{proofAllowed && <div className="wallet-proof-form"><p className="arena-fineprint">After paying, submit your UTR/provider reference. Evidence is reviewed by the assigned payment operator; it does not credit the wallet by itself.</p><input className="wallet-modal__custom-input" placeholder="UTR / provider reference" value={reference} disabled={proofBusy} onChange={(event) => setReference(event.target.value)} aria-label="Payment reference" /><label className="arena-fineprint" htmlFor={`payment-date-${current.id}`}>Payment date and time</label><input id={`payment-date-${current.id}`} className="wallet-modal__custom-input" type="datetime-local" value={paymentAt} disabled={proofBusy} onChange={(event) => setPaymentAt(event.target.value)} aria-label="Payment date and time" /><input className="wallet-modal__custom-input" placeholder="Optional evidence reference" value={evidenceReference} disabled={proofBusy} onChange={(event) => setEvidenceReference(event.target.value)} aria-label="Optional evidence reference" /><Button type="button" size="md" disabled={proofBusy || reference.trim().length < 4 || !paymentAt} onClick={() => void sendProof()}>{proofBusy ? 'Submitting…' : 'Submit payment proof'}</Button>{proofError && <p className="arena-fineprint arena-fineprint--warn" role="alert">{proofError}</p>}</div>}{current.workflowStatus && <p className="arena-fineprint">Workflow: {current.workflowStatus.replaceAll('_', ' ')}</p>}</article>;
 }
 
 function TxRow({ tx }: { tx: Transaction }) {

@@ -315,6 +315,12 @@ export async function createPaymentWithdrawal(input: { amount: number; method: '
   return body.transaction;
 }
 
+export async function submitPaymentProof(transactionId: string, proof: { amount: number; reference: string; paymentAt: number; evidenceReference?: string }): Promise<PlayerPaymentTransaction> {
+  const res = await apiFetch(`/api/payments/deposits/${encodeURIComponent(transactionId)}/proof`, { method: 'POST', body: JSON.stringify(proof) });
+  const body = await parseOrThrow<{ transaction: PlayerPaymentTransaction }>(res);
+  return body.transaction;
+}
+
 export async function fetchPaymentTransactions(operation?: 'DEPOSIT' | 'WITHDRAWAL'): Promise<PlayerPaymentTransaction[]> {
   const query = operation ? `?operation=${operation}` : '';
   const res = await apiFetch(`/api/payments/transactions${query}`);

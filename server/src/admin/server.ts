@@ -69,7 +69,9 @@ import { archiveAdapter, configureAdapter, healthCheckAdapter, listPublicAdapter
 import { getPaymentConfig, getPaymentTransaction, getRoutingDecision, listPaymentAdapters, listPaymentAuditEvents, listPaymentRiskSignals, listPaymentTransactions, listProviderEvents, listReconciliationRecords, updatePaymentConfig } from '../payments/store.js';
 import { reconcileAllPending, reconcileTransaction } from '../payments/reconciliation.js';
 import { listWebhookEvents } from '../payments/webhooks.js';
-import { type PaymentAdapterId, type PaymentConfig, type PaymentLimits, type PaymentOperation, type PaymentTransactionStatus } from '../payments/types.js';
+import { PAYMENT_ADAPTER_SLOTS, type PaymentAdapterId, type PaymentConfig, type PaymentLimits, type PaymentOperation, type PaymentTransactionStatus } from '../payments/types.js';
+import { createOperatorAccount, toPublicOperator } from '../operator/auth.js';
+import { assignOperatorAccounts, getOperator, listOperatorAudit, listOperators, upsertOperator } from '../operator/store.js';
 
 export interface AdminServerDeps {
   roomManager: RoomManager;
@@ -616,6 +618,56 @@ export function createAdminApp(deps: AdminServerDeps) {
     } catch (error) {
       res.status(400).json({ error: error instanceof Error ? error.message : 'Health check failed' });
     }
+  });
+
+  app.get('/admin/payment-operators', requireAdmin, requirePermission('PAYMENT_OPERATOR_ADMIN'), (_req, res) => {
+    res.json({ operators: listOperators().map(toPublicOperator) });
+  });
+
+  app.post('/admin/payment-operators', requireAdmin, requirePermission('PAYMENT_OPERATOR_ADMIN'), writeLimiter, async (req, res) => {
+    const admin = req.admin!;
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    const accountIds = Array.isArray(req.body?.assignedPaymentAccountIds) ? req.body.assignedPaymentAccountIds.filter((value: unknown): value is PaymentAdapterId => typeof value === 'string' && (PAYMENT_ADAPTER_SLOTS as readonly string[]).includes(value)) : [];
+    if (!reason) return res.status(400).json({ error: 'A reason is required to create a payment operator' });
+    if (accountIds.length !== (Array.isArray(req.body?.assignedPaymentAccountIds) ? req.body.assignedPaymentAccountIds.length : 0)) return res.status(400).json({ error: 'Every assigned payment account must be a valid adapter slot' });
+    try {
+      const operator = await createOperatorAccount(name, password, admin.id, accountIds);
+      writeAudit({ admin, action: 'CREATE_PAYMENT_OPERATOR', targetKind: 'paymentOperator', targetId: operator.id, reason, after: { name: operator.name, assignedPaymentAccountIds: operator.assignedPaymentAccountIds }, result: 'success', requestId: requestId(req) });
+      res.status(201).json({ ok: true, operator: toPublicOperator(operator) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Payment operator creation failed';
+      writeAudit({ admin, action: 'CREATE_PAYMENT_OPERATOR', targetKind: 'paymentOperator', targetId: null, reason, result: 'failure', errorMessage: message, requestId: requestId(req) });
+      res.status(400).json({ error: message });
+    }
+  });
+
+  app.put('/admin/payment-operators/:id', requireAdmin, requirePermission('PAYMENT_OPERATOR_ADMIN'), writeLimiter, (req, res) => {
+    const admin = req.admin!;
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+    const operator = getOperator(req.params.id ?? '');
+    if (!reason) return res.status(400).json({ error: 'A reason is required to change a payment operator' });
+    if (!operator) return res.status(404).json({ error: 'Payment operator not found' });
+    const patch: { status?: 'ACTIVE' | 'DISABLED'; assignedPaymentAccountIds?: PaymentAdapterId[] } = {};
+    if (typeof req.body?.status === 'string') {
+      if (req.body.status !== 'ACTIVE' && req.body.status !== 'DISABLED') return res.status(400).json({ error: 'Invalid operator status' });
+      patch.status = req.body.status;
+    }
+    if (Array.isArray(req.body?.assignedPaymentAccountIds)) {
+      if (req.body.assignedPaymentAccountIds.some((value: unknown) => typeof value !== 'string' || !(PAYMENT_ADAPTER_SLOTS as readonly string[]).includes(value))) return res.status(400).json({ error: 'Invalid assigned payment account' });
+      patch.assignedPaymentAccountIds = req.body.assignedPaymentAccountIds;
+    }
+    const before = toPublicOperator(operator);
+    const updated = patch.assignedPaymentAccountIds ? assignOperatorAccounts(operator.id, patch.assignedPaymentAccountIds) : operator;
+    if (!updated) return res.status(404).json({ error: 'Payment operator not found' });
+    if (patch.status) { updated.status = patch.status; upsertOperator(updated); }
+    writeAudit({ admin, action: 'UPDATE_PAYMENT_OPERATOR', targetKind: 'paymentOperator', targetId: operator.id, reason, before, after: toPublicOperator(updated), result: 'success', requestId: requestId(req) });
+    res.json({ ok: true, operator: toPublicOperator(updated) });
+  });
+
+  app.get('/admin/payment-operator-audit', requireAdmin, requirePermission('PAYMENT_OPERATOR_ADMIN'), (_req, res) => {
+    res.json({ entries: listOperators().flatMap((operator) => listOperatorAudit(operator.id)).sort((a, b) => b.createdAt - a.createdAt).slice(0, 500) });
   });
 
   app.get('/admin/payment-overview', requireAdmin, requirePermission('PAYMENT_VIEW'), (_req, res) => {

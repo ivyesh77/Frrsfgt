@@ -6,7 +6,8 @@ export type PaymentMethod = 'UPI' | 'CRYPTO';
 export type PaymentOperation = 'DEPOSIT' | 'WITHDRAWAL';
 export type PaymentCurrency = 'INR' | 'USDT';
 export type PaymentEnvironment = 'TEST' | 'SANDBOX' | 'PRODUCTION';
-export type AdapterLifecycleStatus = 'ACTIVE' | 'DISABLED' | 'ARCHIVED';
+export type AdapterLifecycleStatus = 'ACTIVE' | 'DISABLED' | 'MAINTENANCE' | 'DEGRADED' | 'ARCHIVED';
+export type PaymentWorkflowStatus = 'AWAITING_PAYMENT' | 'PAYMENT_SUBMITTED' | 'AWAITING_VERIFICATION' | 'UNDER_REVIEW' | 'VERIFIED' | 'REJECTED' | 'EXPIRED' | 'CANCELLED' | 'PROCESSING' | 'CONFIRMED';
 export type AdapterHealthStatus = 'HEALTHY' | 'DEGRADED' | 'UNAVAILABLE' | 'MAINTENANCE' | 'DISABLED';
 export type RoutingStrategy = 'ROUND_ROBIN' | 'WEIGHTED' | 'PRIORITY' | 'LEAST_LOAD' | 'CAPACITY_BASED';
 export type PaymentTransactionStatus = 'CREATED' | 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'EXPIRED' | 'CANCELLED' | 'REVERSED';
@@ -109,8 +110,20 @@ export interface PaymentTransaction {
   completedAt: number | null;
   failureReason: string | null;
   verifiedAt: number | null;
+  workflowStatus?: PaymentWorkflowStatus;
+  workflowUpdatedAt?: number;
+  proof?: PaymentProof | null;
+  operatorReference?: string | null;
   ledgerTransactionIds: string[];
   correlationId: string;
+}
+
+export interface PaymentProof {
+  amount: number;
+  reference: string;
+  paymentAt: number;
+  evidenceReference?: string | null;
+  submittedAt: number;
 }
 
 export interface PaymentInstructions {

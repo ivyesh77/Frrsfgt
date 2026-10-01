@@ -67,6 +67,7 @@ export const PERMISSIONS = [
   'PAYMENT_RECONCILE',
   'PAYMENT_ADJUST',
   'PAYMENT_ADMIN',
+  'PAYMENT_OPERATOR_ADMIN',
   'webhooks.view',
   'webhooks.retry',
   'reconciliation.view',
@@ -92,7 +93,7 @@ export type Permission = (typeof PERMISSIONS)[number];
  *  anything client-supplied. */
 export const ROLE_PERMISSIONS: Record<AdminRole, readonly Permission[]> = {
   SUPER_ADMIN: PERMISSIONS, // full authorized administration
-  ADMIN: PERMISSIONS.filter((p) => p !== 'admin.manage'), // everything except managing other admins
+  ADMIN: PERMISSIONS.filter((p) => p !== 'admin.manage' && p !== 'PAYMENT_OPERATOR_ADMIN'), // operational admin, not super-admin/operator management
   GAME_OPERATOR: [
     'dashboard.view',
     'rooms.view',

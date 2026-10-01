@@ -46,6 +46,10 @@ export function createPaymentTransaction(params: Omit<PaymentTransaction, 'id' |
     createdAt: now,
     updatedAt: now,
     completedAt: null,
+    workflowStatus: params.workflowStatus ?? (params.operation === 'DEPOSIT' ? 'AWAITING_PAYMENT' : 'PROCESSING'),
+    workflowUpdatedAt: now,
+    proof: params.proof ?? null,
+    operatorReference: params.operatorReference ?? null,
     ledgerTransactionIds: [],
   };
   addPaymentTransaction(transaction);
@@ -57,8 +61,9 @@ export function settleDeposit(transaction: PaymentTransaction): PaymentTransacti
   if (transaction.operation !== 'DEPOSIT') throw new Error('Not a deposit transaction');
   creditPaymentDeposit(transaction.userId, transaction.fees.netAmount, transaction.id, transaction.currency, transaction.fees.totalFee, transaction.clientIdempotencyKey);
   const ledger = findLedgerTransactionByPayment(transaction.id, 'topup');
+  const now = Date.now();
   const updated = transitionPayment(transaction, 'COMPLETED');
-  return updatePaymentTransaction(updated.id, { ledgerTransactionIds: ledger ? [ledger.id] : [], verifiedAt: Date.now() }) ?? updated;
+  return updatePaymentTransaction(updated.id, { ledgerTransactionIds: ledger ? [ledger.id] : [], verifiedAt: now, workflowStatus: 'VERIFIED', workflowUpdatedAt: now }) ?? updated;
 }
 
 export function reserveDepositlessWithdrawal(transaction: PaymentTransaction): PaymentTransaction {
@@ -70,7 +75,8 @@ export function reserveDepositlessWithdrawal(transaction: PaymentTransaction): P
 export function settleWithdrawal(transaction: PaymentTransaction): PaymentTransaction {
   if (transaction.operation !== 'WITHDRAWAL') throw new Error('Not a withdrawal transaction');
   completeWithdrawalReservation(transaction.id);
-  return transitionPayment(transaction, 'COMPLETED');
+  const updated = transitionPayment(transaction, 'COMPLETED');
+  return updatePaymentTransaction(updated.id, { workflowStatus: 'CONFIRMED', workflowUpdatedAt: Date.now() }) ?? updated;
 }
 
 export function failWithdrawal(transaction: PaymentTransaction, status: 'FAILED' | 'EXPIRED' | 'CANCELLED', reason: string): PaymentTransaction {
@@ -78,7 +84,8 @@ export function failWithdrawal(transaction: PaymentTransaction, status: 'FAILED'
   if (transaction.status !== 'REVERSED' && transaction.status !== 'COMPLETED') {
     releaseWithdrawalReservation(transaction.id, transaction.currency, transaction.clientIdempotencyKey);
   }
-  return transitionPayment(transaction, status, reason);
+  const updated = transitionPayment(transaction, status, reason);
+  return updatePaymentTransaction(updated.id, { workflowStatus: status === 'FAILED' ? 'REJECTED' : status === 'EXPIRED' ? 'EXPIRED' : 'CANCELLED', workflowUpdatedAt: Date.now() }) ?? updated;
 }
 
 export function reversePayment(transaction: PaymentTransaction): PaymentTransaction {

@@ -16,10 +16,8 @@ dist-ssr
 # regenerated on first run
 server/data/store.json
 server/data/admin-store.json
-<<<<<<< HEAD
-=======
 server/data/payment-store.json
->>>>>>> 696bc82 (Implement server-authoritative payment system)
+server/data/operator-store.json
 server/data/sessions.log
 *.tsbuildinfo
 

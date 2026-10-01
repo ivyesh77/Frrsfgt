@@ -178,6 +178,10 @@ export function findPaymentByProviderReference(providerReference: string): Payme
   return db.transactions.find((transaction) => transaction.providerReference === providerReference);
 }
 
+export function findPaymentByAnyReference(reference: string): PaymentTransaction | undefined {
+  const normalized = reference.trim();
+  return db.transactions.find((transaction) => transaction.providerReference === normalized || transaction.operatorReference === normalized || transaction.proof?.reference === normalized);
+}
 
 export function listPaymentTransactions(filter: { userId?: string; status?: PaymentTransactionStatus; operation?: PaymentTransaction['operation']; adapterId?: string; from?: number; to?: number } = {}): PaymentTransaction[] {
   return db.transactions.filter((transaction) => {
