@@ -5,6 +5,8 @@
  *  creation (by a SUPER_ADMIN) and is looked up server-side on every single request, never
  *  trusted from a header, cookie payload, or request body. */
 
+import type { MatchHistoryPlayerResult } from '../types.js';
+
 export const ADMIN_ROLES = ['SUPER_ADMIN', 'ADMIN', 'GAME_OPERATOR', 'PAYMENT_OPERATOR', 'SUPPORT_AGENT', 'ANALYST', 'READ_ONLY'] as const;
 export type AdminRole = (typeof ADMIN_ROLES)[number];
 
@@ -313,15 +315,23 @@ export interface SupportNote {
 }
 
 export type SupportTicketStatus = 'open' | 'in_progress' | 'waiting' | 'resolved' | 'closed';
+export type SupportTicketCategory = 'account' | 'wallet' | 'payment' | 'gameplay' | 'other';
 export interface SupportTicket {
   id: string;
   userId: string;
   userName: string;
   subject: string;
+  /** The player's own description of the issue — present for player-opened tickets, null
+   *  for the handful created directly by an admin on a player's behalf (see
+   *  support.ts createTicket, the pre-existing admin-only path, left unchanged). */
+  message: string | null;
+  category: SupportTicketCategory;
   status: SupportTicketStatus;
   createdAt: number;
   updatedAt: number;
-  createdByAdminId: string;
+  /** Null when a PLAYER opened this ticket themselves — the pre-existing admin-initiated
+   *  path still always sets this. Never client-settable either way. */
+  createdByAdminId: string | null;
 }
 
 export type NotificationSeverity = 'info' | 'warning' | 'critical';
@@ -357,6 +367,10 @@ export interface MatchHistoryEntry {
   endedAt: number;
   playerIds: string[];
   winnerIds: string[];
+  /** Full real per-player snapshot (real userId, never redacted here) — empty for a
+   *  cancelled match, since gameplay never actually started. See MatchHistoryPlayerResult's
+   *  own doc-comment for why this is safe server-side storage. */
+  results: MatchHistoryPlayerResult[];
 }
 
 export interface LoginAttemptRecord {

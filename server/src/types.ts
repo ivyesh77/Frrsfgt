@@ -84,6 +84,25 @@ export const FIRST_PLACE_SHARE = 0.6;
 export const STARTING_WALLET_BALANCE = 1000;
 
 // ---------------------------------------------------------------------------
+// Player notification center. Real events only — generated at the exact point a real
+// thing happens server-side (wallet credited/debited, match found, match result known) —
+// never fabricated to make the notification center look busier than the account's real
+// activity. See notifications.ts for every place one of these is actually created.
+// ---------------------------------------------------------------------------
+export type NotificationType = 'game' | 'match' | 'wallet' | 'payment' | 'security' | 'system';
+
+export interface NotificationEntry {
+  id: string;
+  userId: string;
+  type: NotificationType;
+  title: string;
+  body: string;
+  createdAt: number;
+  read: boolean;
+  meta?: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
 // Accounts & auth. `passwordHash` and `usernameKey` are server-internal only
 // and must never be serialized to a client response — see `toPublicUser()`
 // in wallet.ts, which is the single choke point every route must use.
@@ -254,6 +273,10 @@ export interface ActiveRound {
   revealDeadline: number;
   answerDeadline: number;
   minAnswerAt: number;
+  /** Server timestamp the answer phase actually began (options became visible) — the base
+   *  point for a real, honest reaction-time measurement. Null while still in the reveal
+   *  (memorize) phase. */
+  optionsDispatchedAt: number | null;
   resolved: boolean;
   advanceTimer: NodeJS.Timeout | null;
   expireTimer: NodeJS.Timeout | null;
@@ -287,6 +310,15 @@ export interface RoomPlayer {
   /** Server-owned grace timer started the instant this player disconnects mid-match; if it
    *  fires before they reconnect, they are marked `forfeited`. Never exposed to any client. */
   forfeitTimer: NodeJS.Timeout | null;
+  /** Current consecutive-correct-answer run (resets to 0 on any wrong answer or timeout)
+   *  and the highest it ever reached this match — both real, round-by-round tracked. */
+  correctStreak: number;
+  maxStreak: number;
+  /** Running sum/count of real per-round reaction times (ms, answer-phase-start to actual
+   *  submission) so a lifetime average can be computed without storing every round. */
+  reactionMsSum: number;
+  reactionCount: number;
+  fastestReactionMs: number | null;
 }
 
 export interface RoomPlayerPublic {
@@ -335,6 +367,37 @@ export interface MatchResultPlayer {
   payout: number;
   isWinner: boolean;
   connectionState: PlayerConnectionState;
+  /** Longest consecutive-correct-answer run this player reached during the match — real,
+   *  tracked live round-by-round server-side (see rooms.ts), never computed/asserted by a
+   *  client. Powers both the result screen's "performance stats" and streak achievements. */
+  maxStreak: number;
+  /** Average time (ms) from when this player's answer options actually became visible
+   *  (server-timed) to when they submitted an answer, across every answered round this
+   *  match. Null if they never answered a single round (e.g. every round timed out). */
+  avgReactionMs: number | null;
+  /** The single fastest of those reaction times this match. Null under the same condition
+   *  as avgReactionMs. */
+  fastestReactionMs: number | null;
+}
+
+/** Server-storage-only per-player snapshot of a finished/cancelled match, keyed by REAL
+ *  userId (never redacted here — this never leaves the server directly; see
+ *  playerHistory.ts for the per-viewer redaction applied at read time). Written once, the
+ *  instant a match concludes, straight from the same authoritative numbers already
+ *  computed for the real-time match:end payload — never a second, independently-derived
+ *  copy that could drift from what players actually saw during the match. */
+export interface MatchHistoryPlayerResult {
+  userId: string;
+  name: string;
+  score: number;
+  correct: number;
+  wrong: number;
+  payout: number;
+  isWinner: boolean;
+  connectionState: PlayerConnectionState;
+  maxStreak: number;
+  avgReactionMs: number | null;
+  fastestReactionMs: number | null;
 }
 
 export interface MatchResultPublic {

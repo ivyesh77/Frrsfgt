@@ -14,7 +14,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { Transaction, User } from './types.js';
+import type { NotificationEntry, Transaction, User } from './types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, '..', 'data');
@@ -24,11 +24,12 @@ const DATA_FILE_TMP = join(DATA_DIR, 'store.json.tmp');
 interface DbShape {
   users: Record<string, User>;
   transactions: Transaction[];
+  notifications: NotificationEntry[];
 }
 
 function loadDb(): DbShape {
   try {
-    if (!existsSync(DATA_FILE)) return { users: {}, transactions: [] };
+    if (!existsSync(DATA_FILE)) return { users: {}, transactions: [], notifications: [] };
     const raw = readFileSync(DATA_FILE, 'utf-8');
     const parsed = JSON.parse(raw) as Partial<DbShape>;
     const users = parsed.users ?? {};
@@ -41,10 +42,11 @@ function loadDb(): DbShape {
     return {
       users,
       transactions: Array.isArray(parsed.transactions) ? parsed.transactions : [],
+      notifications: Array.isArray(parsed.notifications) ? parsed.notifications : [],
     };
   } catch {
     // Corrupted file on disk should never crash the server — start fresh in memory.
-    return { users: {}, transactions: [] };
+    return { users: {}, transactions: [], notifications: [] };
   }
 }
 
@@ -125,8 +127,52 @@ export function listAllTransactionsRaw(): Transaction[] {
   return db.transactions;
 }
 
+// ---------------------------------------------------------------------------
+// Player notification center storage. Append-only from the app's perspective (entries are
+// never deleted, only marked read) — see notifications.ts for the real event triggers.
+// ---------------------------------------------------------------------------
+
+const MAX_NOTIFICATIONS_PER_USER = 200;
+
+export function appendNotification(entry: NotificationEntry): void {
+  db.notifications.push(entry);
+  // Cap per-user, not globally — an active player's own feed should never be pushed out by
+  // other users' activity, but it also shouldn't grow unbounded for a long-lived account.
+  const forUser = db.notifications.filter((n) => n.userId === entry.userId);
+  if (forUser.length > MAX_NOTIFICATIONS_PER_USER) {
+    const toDrop = forUser.length - MAX_NOTIFICATIONS_PER_USER;
+    const dropIds = new Set(forUser.slice(0, toDrop).map((n) => n.id));
+    db.notifications = db.notifications.filter((n) => !dropIds.has(n.id));
+  }
+  saveDb(db);
+}
+
+export function listNotificationsForUser(userId: string): NotificationEntry[] {
+  return db.notifications.filter((n) => n.userId === userId);
+}
+
+export function markNotificationRead(userId: string, id: string): NotificationEntry | null {
+  const entry = db.notifications.find((n) => n.id === id && n.userId === userId);
+  if (!entry) return null;
+  entry.read = true;
+  saveDb(db);
+  return entry;
+}
+
+export function markAllNotificationsRead(userId: string): number {
+  let count = 0;
+  for (const n of db.notifications) {
+    if (n.userId === userId && !n.read) {
+      n.read = true;
+      count += 1;
+    }
+  }
+  if (count > 0) saveDb(db);
+  return count;
+}
+
 /** Test-only escape hatch so the self-test suite starts from a clean slate. */
 export function __resetStoreForTests(): void {
-  db = { users: {}, transactions: [] };
+  db = { users: {}, transactions: [], notifications: [] };
   saveDb(db);
 }

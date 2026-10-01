@@ -690,6 +690,145 @@ async function testWalletAbuse(): Promise<void> {
   assert(statsUnauthed.status === 401, 'wallet stats requires authentication');
 }
 
+/** Exercises every new player-facing product surface added for the full-app build-out:
+ *  game-modes config, payment-methods projection, notifications (real-event-triggered
+ *  only), support tickets (player-initiated, own-tickets-only), and match-history/stats/
+ *  achievements derived from a real played match — never a seeded/fabricated row. */
+async function testPlayerProductSurfaces(): Promise<void> {
+  // --- Public game-mode config reflects real server flags, not a client-hardcoded list ---
+  {
+    const res = await fetch(`${BASE_URL}/api/game-modes`);
+    const body = (await res.json()) as { modes: Array<{ id: string; enabled: boolean }>; entryFees: number[] };
+    assert(res.status === 200, 'GET /api/game-modes succeeds without auth');
+    const duel = body.modes.find((m) => m.id === 'duel');
+    const squad = body.modes.find((m) => m.id === 'squad');
+    assert(duel?.enabled === true, 'duel mode is reported enabled (matches default admin flag)');
+    assert(squad?.enabled === true, 'squad mode is reported enabled (matches default admin flag)');
+  }
+
+  const sam = await freshSession('ProductSam');
+
+  // --- Signup itself produced a real welcome notification, nothing fabricated client-side ---
+  {
+    const res = await authedFetch(sam.cookie, '/api/notifications');
+    const body = (await res.json()) as { items: Array<{ type: string; title: string }>; unreadCount: number };
+    assert(res.status === 200, 'GET /api/notifications succeeds for an authenticated player');
+    assert(body.items.length >= 1, 'a brand-new account already has at least one real notification (signup)');
+    assert(body.unreadCount >= 1, 'the fresh notification starts out unread');
+  }
+
+  // --- Payment methods projection is honest about what's actually enabled ---
+  {
+    const res = await authedFetch(sam.cookie, '/api/payment-methods');
+    const body = (await res.json()) as { demoWallet: { available: boolean }; upi: { enabled: boolean } | null; crypto: unknown[] };
+    assert(res.status === 200, 'GET /api/payment-methods succeeds');
+    assert(body.demoWallet.available === true, 'demo wallet is always honestly reported as the only live payment method');
+    assert(body.upi !== null && body.upi.enabled === false, 'UPI is honestly reported disabled by default (no real provider wired up)');
+  }
+
+  // --- A real wallet top-up produces a real wallet notification (not a fake client toast) ---
+  {
+    const before = await (await authedFetch(sam.cookie, '/api/notifications/unread-count')).json() as { unreadCount: number };
+    const topupRes = await authedFetch(sam.cookie, '/api/wallet/topup', { method: 'POST', body: JSON.stringify({ amount: 100 }) });
+    assert(topupRes.status === 200, 'wallet top-up succeeds for a fresh account');
+    await new Promise((r) => setTimeout(r, 50));
+    const after = await (await authedFetch(sam.cookie, '/api/notifications/unread-count')).json() as { unreadCount: number };
+    assert(after.unreadCount === before.unreadCount + 1, 'a genuine top-up produces exactly one new real notification, not zero or a duplicate');
+
+    const list = (await (await authedFetch(sam.cookie, '/api/notifications')).json()) as { items: Array<{ id: string; type: string }> };
+    const walletNotif = list.items.find((n) => n.type === 'wallet');
+    assert(!!walletNotif, 'the new notification is correctly typed as a wallet event');
+    const markRes = await authedFetch(sam.cookie, `/api/notifications/${walletNotif!.id}/read`, { method: 'POST' });
+    assert(markRes.status === 200, 'marking one real notification as read succeeds');
+    const afterMark = (await (await authedFetch(sam.cookie, '/api/notifications/unread-count')).json()) as { unreadCount: number };
+    assert(afterMark.unreadCount === after.unreadCount - 1, 'marking a notification read decrements the unread count by exactly one');
+  }
+
+  // --- Before playing any match, history/stats/achievements are honestly empty/zeroed, never fake ---
+  {
+    const historyRes = await authedFetch(sam.cookie, '/api/match-history');
+    const history = (await historyRes.json()) as { items: unknown[]; total: number };
+    assert(history.total === 0 && history.items.length === 0, 'an account with zero finished matches has an honestly empty match history');
+
+    const statsRes = await authedFetch(sam.cookie, '/api/stats');
+    const stats = (await statsRes.json()) as { stats: { gamesPlayed: number; winRate: number } };
+    assert(stats.stats.gamesPlayed === 0 && stats.stats.winRate === 0, 'stats for a zero-match account are honestly zero, not a placeholder number');
+
+    const achRes = await authedFetch(sam.cookie, '/api/achievements');
+    const ach = (await achRes.json()) as { achievements: Array<{ id: string; status: string }> };
+    assert(ach.achievements.every((a) => a.status === 'locked'), 'every achievement is genuinely locked before any match has been played');
+  }
+
+  // --- Play one real duel to completion, then confirm it shows up everywhere truthfully ---
+  {
+    const olive = await freshSession('ProductOlive');
+    const sockets = [connect(sam.cookie), connect(olive.cookie)];
+    await Promise.all(sockets.map((s) => new Promise<void>((r) => s.on('connect', () => r()))));
+    const acks = await Promise.all([queueJoin(sockets[0]!, 10, 'duel'), queueJoin(sockets[1]!, 10, 'duel')]);
+    assert(acks.every((a) => a.ok), 'both players successfully join the real duel queue for this test');
+    const roomId = acks[0]!.roomId!;
+    const matchEndPromises = [playUntilMatchEnds(sockets[0]!, roomId, 'correct'), playUntilMatchEnds(sockets[1]!, roomId, 'always-wrong')];
+    await Promise.all(sockets.map((s) => emitAck(s, 'rooms:ready', { roomId })));
+    const [samResult] = await Promise.all(matchEndPromises);
+    assert(samResult!.results.find((r) => r.isWinner) !== undefined, 'the played duel resolves to a real winner (sam answered honestly every round)');
+    sockets.forEach((s) => s.disconnect());
+    await new Promise((r) => setTimeout(r, 150));
+
+    const historyRes = await authedFetch(sam.cookie, '/api/match-history');
+    const history = (await historyRes.json()) as { items: Array<{ roomId: string; outcome: string }>; total: number };
+    assert(history.total === 1, 'the real finished match now appears exactly once in match history');
+    const entry = history.items[0]!;
+    assert(entry.roomId === roomId, 'the history entry correctly identifies the room that was actually played');
+    assert(entry.outcome === 'win', "sam's honest play is correctly reflected as a win in history, not guessed/defaulted");
+
+    const detailRes = await authedFetch(sam.cookie, `/api/match-history/${roomId}`);
+    const detail = (await detailRes.json()) as { match: { opponents: Array<{ name: string; userId?: string }> } };
+    assert(detailRes.status === 200, 'match detail is fetchable for a match this player actually took part in');
+    assert(
+      detail.match.opponents.every((o) => !('userId' in o) || o.userId === undefined),
+      "the opponent's real internal userId is never leaked in the player-facing match detail",
+    );
+
+    const statsRes = await authedFetch(sam.cookie, '/api/stats');
+    const stats = (await statsRes.json()) as { stats: { gamesPlayed: number; wins: number } };
+    assert(stats.stats.gamesPlayed === 1 && stats.stats.wins === 1, 'stats now truthfully reflect exactly the one real match just played');
+
+    const achRes = await authedFetch(sam.cookie, '/api/achievements');
+    const ach = (await achRes.json()) as { achievements: Array<{ id: string; status: string }> };
+    const firstGame = ach.achievements.find((a) => a.id === 'games_1');
+    const firstWin = ach.achievements.find((a) => a.id === 'win_1');
+    assert(firstGame?.status === 'unlocked', 'the "first game" achievement unlocks the moment a real match is actually finished');
+    assert(firstWin?.status === 'unlocked', 'the "first win" achievement unlocks only after a real win, not fabricated');
+
+    // Another account must never see sam's match in its own history — proves the
+    // per-account filtering is real, not just an unfiltered global feed.
+    const unrelatedRes = await authedFetch(olive.cookie, `/api/match-history/${roomId}`);
+    assert(unrelatedRes.status === 200, "olive (sam's real opponent) can see the match she actually played in");
+    const strangers = await freshSession('ProductStranger');
+    const strangerRes = await authedFetch(strangers.cookie, `/api/match-history/${roomId}`);
+    assert(strangerRes.status === 404, "an unrelated account can never fetch another player's match detail by guessing the room id");
+  }
+
+  // --- Support tickets: a player can open and read only their own ---
+  {
+    const createRes = await authedFetch(sam.cookie, '/api/support/tickets', {
+      method: 'POST',
+      body: JSON.stringify({ subject: 'Cannot see my balance', message: 'My wallet balance looks wrong after a top-up.', category: 'wallet' }),
+    });
+    const created = (await createRes.json()) as { ticket: { id: string; userId: string } };
+    assert(createRes.status === 200, 'a player can open a support ticket');
+    assert(created.ticket.userId === sam.user.id, "the created ticket is correctly attributed to the real caller's own account");
+
+    const listRes = await authedFetch(sam.cookie, '/api/support/tickets');
+    const list = (await listRes.json()) as { tickets: Array<{ id: string }> };
+    assert(list.tickets.some((t) => t.id === created.ticket.id), 'the new ticket appears in the caller\'s own ticket list');
+
+    const strangers = await freshSession('ProductStranger2');
+    const strangerFetch = await authedFetch(strangers.cookie, `/api/support/tickets/${created.ticket.id}`);
+    assert(strangerFetch.status === 404, "an unrelated account can never fetch another player's support ticket by id");
+  }
+}
+
 async function main() {
   testGenerators();
   testPayoutMath();
@@ -705,6 +844,7 @@ async function main() {
   await testMatchmakingRaces();
   await testConnectionHandling();
   await testWalletAbuse();
+  await testPlayerProductSurfaces();
 
   // --- Leave-before-start should fully refund the entry fee -----------------
   {

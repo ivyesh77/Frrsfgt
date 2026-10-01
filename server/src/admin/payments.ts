@@ -81,6 +81,36 @@ export function updateCryptoConfig(asset: string, network: string, patch: Partia
   return next;
 }
 
+/** Public-safe projection for the player-facing Payment Methods / Deposit screens — only
+ *  what a player legitimately needs to decide which method to use (enabled? limits?
+ *  network?), never an internal field (updatedBy, maintenance notes, fee basis points as
+ *  raw internal units, etc). There are no secrets in the underlying config to begin with
+ *  (no real provider is integrated — see this file's module doc-comment), but this keeps
+ *  the player route from ever being able to leak a future field added here by accident. */
+export interface PublicPaymentMethods {
+  demoWallet: { available: true; note: string };
+  upi: { enabled: boolean; minAmount: number; maxAmount: number } | null;
+  crypto: Array<{ asset: string; network: string; depositEnabled: boolean; withdrawEnabled: boolean; minAmount: number; maxAmount: number; confirmationsRequired: number }>;
+}
+
+export function publicPaymentMethodsView(): PublicPaymentMethods {
+  const upi = getEffectiveUpiConfig();
+  const crypto = getEffectiveCryptoConfigs();
+  return {
+    demoWallet: { available: true, note: 'Instant demo-currency deposits/withdrawals — practice coins only, never real money.' },
+    upi: upi.enabled ? { enabled: true, minAmount: upi.minAmount, maxAmount: upi.maxAmount } : { enabled: false, minAmount: upi.minAmount, maxAmount: upi.maxAmount },
+    crypto: crypto.map((c) => ({
+      asset: c.asset,
+      network: c.network,
+      depositEnabled: c.depositEnabled,
+      withdrawEnabled: c.withdrawEnabled,
+      minAmount: c.minAmount,
+      maxAmount: c.maxAmount,
+      confirmationsRequired: c.confirmationsRequired,
+    })),
+  };
+}
+
 export function networkMismatchWarnings(): string[] {
   const configs = getEffectiveCryptoConfigs();
   const byAsset = new Map<string, CryptoNetworkConfig[]>();

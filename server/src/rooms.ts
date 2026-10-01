@@ -8,11 +8,13 @@ import { recordTransaction } from './store.js';
 import { recordMatch } from './admin/matchHistory.js';
 import { recordEvent } from './admin/signals.js';
 import { getEffectiveGameConfig } from './admin/config.js';
+import { pushNotification } from './notifications.js';
 import {
   roomFormatMeta,
   MIN_REACTION_MS,
   type ActiveRound,
   type GameKind,
+  type MatchHistoryPlayerResult,
   type MatchResultPlayer,
   type MatchResultPublic,
   type PlayerConnectionState,
@@ -196,6 +198,11 @@ export class RoomManager {
       connectionState: 'connected',
       activeRound: null,
       forfeitTimer: null,
+      correctStreak: 0,
+      maxStreak: 0,
+      reactionMsSum: 0,
+      reactionCount: 0,
+      fastestReactionMs: null,
     };
     room.players.set(user.id, player);
     this.activeRoomByUser.set(user.id, room.id);
@@ -385,6 +392,7 @@ export class RoomManager {
       endedAt: Date.now(),
       playerIds: [...room.players.keys()],
       winnerIds: [],
+      results: [],
     });
 
     setTimeout(() => {
@@ -399,8 +407,10 @@ export class RoomManager {
     room.status = 'ready_check';
     const timeoutMs = getEffectiveGameConfig().lobbyReadyTimeoutMs;
     room.readyDeadline = Date.now() + timeoutMs;
+    const formatLabel = roomFormatMeta(room.format).label;
     for (const player of room.players.values()) {
       this.io.to(player.socketId).emit('match:found', toRoomPublic(room, player.userId));
+      pushNotification(player.userId, 'match', 'Opponent found', `Your ${formatLabel} lobby is full — ready up to start.`, { roomId: room.id });
     }
     this.broadcastRoom(room);
     const timer = setTimeout(() => {
@@ -486,6 +496,7 @@ export class RoomManager {
       revealDeadline,
       answerDeadline: 0, // filled in once the answer phase actually begins
       minAnswerAt: 0,
+      optionsDispatchedAt: null,
       resolved: false,
       advanceTimer: null,
       expireTimer: null,
@@ -509,6 +520,7 @@ export class RoomManager {
       activeRound.phase = 'answer';
       activeRound.answerDeadline = now + answerMs;
       activeRound.minAnswerAt = now + MIN_REACTION_MS;
+      activeRound.optionsDispatchedAt = now;
 
       const optionsPayload: RoundOptionsPublic = {
         roundId,
@@ -536,6 +548,7 @@ export class RoomManager {
     player.wrong += 1;
     player.lastAnswerAt = Date.now();
     player.activeRound = null;
+    player.correctStreak = 0; // a timeout breaks a correct-answer streak exactly like a wrong answer
     recordEvent('roundTimeout', player.userId);
 
     const timeoutPayload: RoundTimeoutPublic = { roundId: round.roundId, correctToken: round.correctToken, score: player.score };
@@ -590,9 +603,20 @@ export class RoomManager {
     if (correct) {
       player.score += config.correctScoreDelta;
       player.correct += 1;
+      player.correctStreak += 1;
+      if (player.correctStreak > player.maxStreak) player.maxStreak = player.correctStreak;
     } else {
       player.score += config.wrongPenaltyDelta;
       player.wrong += 1;
+      player.correctStreak = 0;
+    }
+    // Real reaction time: from when this round's options actually became visible
+    // (server-timed) to this genuine submission — never a client-reported duration.
+    if (round.optionsDispatchedAt !== null) {
+      const reactionMs = now - round.optionsDispatchedAt;
+      player.reactionMsSum += reactionMs;
+      player.reactionCount += 1;
+      if (player.fastestReactionMs === null || reactionMs < player.fastestReactionMs) player.fastestReactionMs = reactionMs;
     }
     player.lastAnswerAt = now;
     recordEvent('answerSubmitted', userId);
@@ -661,6 +685,25 @@ export class RoomManager {
       return { player: p, score: p.score, correct: p.correct, wrong: p.wrong, payout, isWinner };
     });
 
+    // One real, server-side-only snapshot (keeps every player's REAL userId — this is
+    // server storage, not a wire payload) used purely to back each player's own match
+    // history / stats later, since the live Room object is deleted from memory shortly
+    // after this function returns. Per-viewer id redaction for other players still happens
+    // separately, at read time, in playerHistory.ts — never baked into storage.
+    const historyResults: MatchHistoryPlayerResult[] = baseResults.map((r) => ({
+      userId: r.player.userId,
+      name: r.player.name,
+      score: r.score,
+      correct: r.correct,
+      wrong: r.wrong,
+      payout: r.payout,
+      isWinner: r.isWinner,
+      connectionState: r.player.connectionState,
+      maxStreak: r.player.maxStreak,
+      avgReactionMs: r.player.reactionCount > 0 ? Math.round(r.player.reactionMsSum / r.player.reactionCount) : null,
+      fastestReactionMs: r.player.fastestReactionMs,
+    }));
+
     for (const player of room.players.values()) {
       const results: MatchResultPlayer[] = baseResults.map((r) => ({
         id: r.player.userId === player.userId ? r.player.userId : r.player.publicId,
@@ -671,6 +714,9 @@ export class RoomManager {
         payout: r.payout,
         isWinner: r.isWinner,
         connectionState: r.player.connectionState,
+        maxStreak: r.player.maxStreak,
+        avgReactionMs: r.player.reactionCount > 0 ? Math.round(r.player.reactionMsSum / r.player.reactionCount) : null,
+        fastestReactionMs: r.player.fastestReactionMs,
       }));
       const payload: MatchResultPublic = {
         roomId: room.id,
@@ -704,7 +750,23 @@ export class RoomManager {
       endedAt: Date.now(),
       playerIds: [...room.players.keys()],
       winnerIds: [...winnerIds],
+      results: historyResults,
     });
+
+    // Real per-player "match finished" notification — one per connected participant,
+    // generated the instant this authoritative result is known (never fabricated, never
+    // sent for a still-in-progress match).
+    for (const r of historyResults) {
+      const outcome = isDraw ? 'draw' : r.isWinner ? 'win' : 'loss';
+      const title = outcome === 'win' ? 'You won!' : outcome === 'draw' ? 'Match drawn' : 'Match finished';
+      const body =
+        outcome === 'win'
+          ? `You scored ${r.score} and won ${r.payout} coins in your ${roomFormatMeta(room.format).label} match.`
+          : outcome === 'draw'
+            ? `Your ${roomFormatMeta(room.format).label} match ended in a draw — your entry fee was refunded.`
+            : `You scored ${r.score} in your ${roomFormatMeta(room.format).label} match.`;
+      pushNotification(r.userId, 'match', title, body, { roomId: room.id });
+    }
 
     // Keep the finished room around briefly for late joiners/reconnects/rematch requests
     // to read state, then drop it and forget every player's association with it.

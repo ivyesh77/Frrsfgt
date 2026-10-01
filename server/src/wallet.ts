@@ -1,6 +1,7 @@
 import { nanoid } from 'nanoid';
 import { hashPassword, normalizeUsername, verifyPassword } from './auth.js';
 import { findUserByUsernameKey, getAllTransactionsForUser, getTransactionsForUser, getUser, recordTransaction, upsertUser } from './store.js';
+import { pushNotification } from './notifications.js';
 import {
   STARTING_WALLET_BALANCE,
   type PublicUser,
@@ -74,6 +75,12 @@ export async function registerUser(name: string, password: string): Promise<User
     timestamp: Date.now(),
     status: 'completed',
   });
+  pushNotification(
+    user.id,
+    'system',
+    'Welcome to Wager Arena',
+    `Your demo wallet has been credited with ${STARTING_WALLET_BALANCE} practice coins — no real money is involved. Good luck!`,
+  );
   return user;
 }
 
@@ -169,7 +176,14 @@ export function topUp(userId: string, amount: number, requestId?: string): User 
   if (!Number.isFinite(amount) || amount <= 0 || amount > 100_000) {
     throw new Error('Invalid top-up amount');
   }
-  return withIdempotency(userId, 'topup', requestId, () => applyDelta(userId, 'topup', Math.round(amount)));
+  // Notification fires only from inside `run()` — a replayed/duplicate requestId returns
+  // the cached result via withIdempotency without re-executing this closure, so a retried
+  // request can never generate a second "deposit completed" notification for one deposit.
+  return withIdempotency(userId, 'topup', requestId, () => {
+    const updated = applyDelta(userId, 'topup', Math.round(amount));
+    pushNotification(userId, 'wallet', 'Deposit completed', `${Math.round(amount)} demo coins were added to your wallet. New balance: ${updated.walletBalance}.`);
+    return updated;
+  });
 }
 
 /** Demo cash-out only — this is where a real payout/crypto-transfer would debit funds
@@ -184,7 +198,9 @@ export function withdraw(userId: string, amount: number, requestId?: string): Us
     if (!user) throw new Error('Unknown user');
     const roundedAmount = Math.round(amount);
     if (roundedAmount > user.walletBalance) throw new InsufficientFundsError();
-    return applyDelta(userId, 'withdrawal', -roundedAmount);
+    const updated = applyDelta(userId, 'withdrawal', -roundedAmount);
+    pushNotification(userId, 'wallet', 'Withdrawal completed', `${roundedAmount} demo coins were withdrawn from your wallet. New balance: ${updated.walletBalance}.`);
+    return updated;
   });
 }
 

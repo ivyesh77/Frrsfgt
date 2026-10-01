@@ -29,6 +29,12 @@ import { appendLoginAttempt } from './admin/store.js';
 import { getEffectiveFlags } from './admin/flags.js';
 import { isUnderMaintenance, getMaintenanceMessage } from './admin/maintenance.js';
 import { recordEvent } from './admin/signals.js';
+import { publicPaymentMethodsView } from './admin/payments.js';
+import { createPlayerTicket, ticketForUser, ticketsForUser } from './admin/support.js';
+import type { SupportTicketCategory } from './admin/types.js';
+import { getPlayerMatchDetail, getPlayerMatchHistory } from './playerHistory.js';
+import { computeAchievements, computePlayerStats } from './playerStats.js';
+import { listNotifications, markAllAsRead, markNotificationAsRead, unreadNotificationCount } from './notifications.js';
 
 const PORT = Number(process.env.PORT) || 8787;
 const ADMIN_PORT = Number(process.env.ADMIN_PORT) || 8788;
@@ -253,6 +259,103 @@ app.post('/api/wallet/withdraw', requireAuth, walletWriteLimiter, (req, res) => 
 app.get('/api/rooms', (req, res) => {
   const gameKind = req.query.gameKind as GameKind | undefined;
   res.json({ rooms: roomManager.listRooms(gameKind), labels: GAME_KIND_LABELS });
+});
+
+// Which room formats are actually offered right now — real server config (feature flags),
+// never a client-invented list. Public (no auth needed) since the mode-select screen is
+// shown before a player necessarily has a live session resolved yet.
+app.get('/api/game-modes', (_req, res) => {
+  const flags = getEffectiveFlags();
+  const modes = ROOM_FORMATS.map((f) => ({ ...f, enabled: f.id === 'duel' ? flags.duelEnabled : f.id === 'squad' ? flags.squadEnabled : false }));
+  res.json({ modes, entryFees: ENTRY_FEE_TIERS });
+});
+
+// ---------------------------------------------------------------------------
+// REST: match history + stats + achievements — all read-only, all derived from the same
+// real, already-stored match-history ledger and wallet transactions every other part of
+// this system uses (see playerHistory.ts / playerStats.ts doc-comments). Every route
+// below derives the account from `req.userId` only, same IDOR-closed pattern as wallet.
+// ---------------------------------------------------------------------------
+app.get('/api/match-history', requireAuth, walletReadLimiter, (req, res) => {
+  const page = Number(req.query.page) || 1;
+  const pageSize = Number(req.query.pageSize) || 10;
+  const format = typeof req.query.format === 'string' ? (req.query.format as RoomFormat | 'all') : 'all';
+  const outcome = typeof req.query.outcome === 'string' ? (req.query.outcome as 'win' | 'loss' | 'draw' | 'void' | 'all') : 'all';
+  res.json(getPlayerMatchHistory(req.userId!, { page, pageSize, format, outcome }));
+});
+
+app.get('/api/match-history/:roomId', requireAuth, walletReadLimiter, (req, res) => {
+  const detail = getPlayerMatchDetail(req.userId!, req.params.roomId ?? '');
+  if (!detail) return res.status(404).json({ error: 'Match not found' });
+  res.json({ match: detail });
+});
+
+app.get('/api/stats', requireAuth, walletReadLimiter, (req, res) => {
+  res.json({ stats: computePlayerStats(req.userId!) });
+});
+
+app.get('/api/achievements', requireAuth, walletReadLimiter, (req, res) => {
+  res.json({ achievements: computeAchievements(req.userId!) });
+});
+
+// ---------------------------------------------------------------------------
+// REST: notifications — real events only (see notifications.ts). A player can only ever
+// read or mark-read their OWN notifications; every function below takes req.userId, never
+// a notification owner read from the request.
+// ---------------------------------------------------------------------------
+app.get('/api/notifications', requireAuth, walletReadLimiter, (req, res) => {
+  const page = Number(req.query.page) || 1;
+  const pageSize = Number(req.query.pageSize) || 20;
+  res.json(listNotifications(req.userId!, page, pageSize));
+});
+
+app.get('/api/notifications/unread-count', requireAuth, walletReadLimiter, (req, res) => {
+  res.json({ unreadCount: unreadNotificationCount(req.userId!) });
+});
+
+app.post('/api/notifications/:id/read', requireAuth, walletWriteLimiter, (req, res) => {
+  const entry = markNotificationAsRead(req.userId!, req.params.id ?? '');
+  if (!entry) return res.status(404).json({ error: 'Notification not found' });
+  res.json({ ok: true, notification: entry });
+});
+
+app.post('/api/notifications/read-all', requireAuth, walletWriteLimiter, (req, res) => {
+  const count = markAllAsRead(req.userId!);
+  res.json({ ok: true, markedCount: count });
+});
+
+// ---------------------------------------------------------------------------
+// REST: payment methods (public-safe config only, see publicPaymentMethodsView) + support
+// tickets. A player can create and read only their OWN tickets — never another user's,
+// never an admin-only field (internal notes, which admin handled it, etc).
+// ---------------------------------------------------------------------------
+app.get('/api/payment-methods', requireAuth, walletReadLimiter, (_req, res) => {
+  res.json(publicPaymentMethodsView());
+});
+
+const SUPPORT_CATEGORIES: SupportTicketCategory[] = ['account', 'wallet', 'payment', 'gameplay', 'other'];
+
+app.get('/api/support/tickets', requireAuth, walletReadLimiter, (req, res) => {
+  res.json({ tickets: ticketsForUser(req.userId!) });
+});
+
+app.get('/api/support/tickets/:id', requireAuth, walletReadLimiter, (req, res) => {
+  const ticket = ticketForUser(req.userId!, req.params.id ?? '');
+  if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+  res.json({ ticket });
+});
+
+app.post('/api/support/tickets', requireAuth, walletWriteLimiter, (req, res) => {
+  const user = getUser(req.userId!);
+  if (!user) return res.status(401).json({ error: 'Not authenticated' });
+  const subject = typeof req.body?.subject === 'string' ? req.body.subject.trim() : '';
+  const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+  const categoryRaw = typeof req.body?.category === 'string' ? req.body.category : 'other';
+  const category = SUPPORT_CATEGORIES.includes(categoryRaw as SupportTicketCategory) ? (categoryRaw as SupportTicketCategory) : 'other';
+  if (!subject || subject.length < 3) return res.status(400).json({ error: 'Please enter a short subject (at least 3 characters)' });
+  if (!message || message.length < 10) return res.status(400).json({ error: 'Please describe the issue in a bit more detail (at least 10 characters)' });
+  const ticket = createPlayerTicket(user.id, user.name, subject, message, category);
+  res.json({ ok: true, ticket });
 });
 
 // ---------------------------------------------------------------------------
