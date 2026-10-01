@@ -239,8 +239,12 @@ export function useArena() {
       // A single 401 is re-confirmed directly with the server (GET /api/auth/me) before
       // bouncing anyone to the login screen — a lone request racing a just-completed
       // login/reconnect, or one dropped packet, must never log out someone whose session
-      // is still genuinely valid. Only a confirmed, repeat "no" from the server itself
-      // (or that confirmation call failing the same way) is treated as a real expiry.
+      // is still genuinely valid. Only an explicit, clean "no" from that confirmation call
+      // (fetchMe() resolving to null, i.e. the server itself returned 401 again) is ever
+      // treated as a real expiry. Any OTHER failure here (a network blip, the dev server
+      // briefly restarting, a transient 5xx) is inconclusive, NOT a confirmed expiry — it
+      // must never log out someone who may still have a perfectly valid session; the
+      // screen that hit the original error can show/retry its own local error as before.
       void fetchMe()
         .then((user) => {
           confirming = false;
@@ -249,9 +253,7 @@ export function useArena() {
           dispatch({ type: 'SESSION_EXPIRED' });
         })
         .catch(() => {
-          confirming = false;
-          disconnectArenaSocket();
-          dispatch({ type: 'SESSION_EXPIRED' });
+          confirming = false; // inconclusive — leave the session alone, do not log out
         });
     });
     return () => setUnauthorizedHandler(null);
