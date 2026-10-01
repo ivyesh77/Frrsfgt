@@ -34,6 +34,13 @@ describe('TEST 19 — negative test: real session invalidation', () => {
     const logoutRes = await fetch(`${BACKEND}/api/auth/logout`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
     expect(logoutRes.status).toBe(200);
 
+    // TEST 6 requirement: after logout, a protected API call with the now-dead token must
+    // return exactly 401 (not 403/500/anything else) — this is the literal status code the
+    // rest of the app's error classification depends on to ever show "session expired" at
+    // all, so it must be a real, checked fact here, not just inferred from UI behavior.
+    const meAfterLogout = await fetch(`${BACKEND}/api/auth/me`, { headers: { Authorization: `Bearer ${token}` } });
+    expect(meAfterLogout.status).toBe(401);
+
     // A fresh "page" (same tab/cookies, module state reset) must now correctly detect the
     // real 401 and show the logged-out screen — not keep rendering as authenticated.
     const vitestMod = await import('vitest');
