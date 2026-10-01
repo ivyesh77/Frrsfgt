@@ -21,7 +21,9 @@ declare module 'express-serve-static-core' {
 
 function extractTokens(req: Request): { bearer?: string; cookie?: string } {
   const authHeader = req.headers.authorization;
-  const bearer = authHeader?.startsWith('Bearer ') ? authHeader.slice('Bearer '.length) : undefined;
+  const authorizationBearer = authHeader?.startsWith('Bearer ') ? authHeader.slice('Bearer '.length) : undefined;
+  const previewBearer = req.headers['x-arena-admin-session-token'];
+  const bearer = authorizationBearer ?? (typeof previewBearer === 'string' ? previewBearer : undefined);
   const cookies = req.cookies as Record<string, string> | undefined;
   return { bearer, cookie: cookies?.[ADMIN_SESSION_COOKIE] };
 }

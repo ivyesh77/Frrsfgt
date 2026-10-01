@@ -116,6 +116,8 @@ async function main() {
   const me = await adminJson<{ admin: { role: string }; permissions: string[] }>(superToken, '/admin/auth/me');
   assert(me.status === 200 && me.body.admin.role === 'SUPER_ADMIN', 'GET /admin/auth/me resolves the real session, not anything client-asserted');
   assert(me.body.permissions.includes('admin.manage'), 'SUPER_ADMIN has the admin.manage permission');
+  const previewHeaderMe = await fetch(`${ADMIN_BASE}/admin/auth/me`, { headers: { 'X-Arena-Admin-Session-Token': superToken } });
+  assert(previewHeaderMe.status === 200, 'preview fallback admin session header authenticates when Authorization is rewritten');
 
   // ===========================================================================
   // 2. UNAUTHORIZED ADMIN API ACCESS

@@ -85,6 +85,13 @@ function requestId(req: Request): string {
   return typeof existing === 'string' && existing.length > 0 ? existing : nanoid(12);
 }
 
+function requestAdminBearer(req: Request): string | undefined {
+  const authHeader = req.headers.authorization;
+  if (authHeader?.startsWith('Bearer ')) return authHeader.slice('Bearer '.length);
+  const previewToken = req.headers['x-arena-admin-session-token'];
+  return typeof previewToken === 'string' ? previewToken : undefined;
+}
+
 const SERVER_STARTED_AT = Date.now();
 
 export function createAdminApp(deps: AdminServerDeps) {
@@ -183,8 +190,7 @@ export function createAdminApp(deps: AdminServerDeps) {
   });
 
   app.post('/admin/auth/logout', (req, res) => {
-    const authHeader = req.headers.authorization;
-    const bearer = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+    const bearer = requestAdminBearer(req);
     const cookie = (req.cookies as Record<string, string> | undefined)?.[ADMIN_SESSION_COOKIE];
     destroyAdminSession(bearer);
     if (cookie !== bearer) destroyAdminSession(cookie);
@@ -210,8 +216,7 @@ export function createAdminApp(deps: AdminServerDeps) {
     if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Current and new password are required' });
     try {
       const updated = await changeOwnAdminPassword(admin.id, currentPassword, newPassword);
-      const authHeader = req.headers.authorization;
-      const bearer = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+      const bearer = requestAdminBearer(req);
       const cookieToken = (req.cookies as Record<string, string> | undefined)?.[ADMIN_SESSION_COOKIE];
       const currentToken = bearer ?? cookieToken;
       destroyAllSessionsForAdmin(admin.id); // rotate out every existing session, including this request's...
