@@ -1,7 +1,10 @@
+import { useEffect, useRef } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { roomFormatMeta, initialsOf, type ArenaUser, type RoomPlayerPublic, type RoomStatePublic } from '../types';
 import { useNow } from '../useNow';
 import { Button } from '../../components/common/Button';
+import { sounds } from '../sound';
+import { haptics } from '../haptics';
 
 interface MatchmakingProps {
   user: ArenaUser;
@@ -42,6 +45,26 @@ export function Matchmaking({ user, room, matchFoundToken, onReady, onLeave }: M
   const readySeconds = secondsLeft(room.readyDeadline, now);
   const startSeconds = secondsLeft(room.startsAt, now);
   const goCount = room.startsAt !== null ? Math.max(1, Math.ceil((room.startsAt - now) / 1000)) : 1;
+
+  // One tick sound/haptic per distinct displayed count (3, 2, 1, GO), driven purely by the
+  // server-owned `startsAt` deadline — never a client-side timer of its own.
+  const lastTickRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (room.status !== 'starting') {
+      lastTickRef.current = null;
+      return;
+    }
+    const current = startSeconds <= 0 ? 0 : goCount;
+    if (lastTickRef.current === current) return;
+    lastTickRef.current = current;
+    if (current <= 0) {
+      sounds.countdownGo();
+      haptics.tap();
+    } else {
+      sounds.countdownTick();
+      haptics.countdownTick();
+    }
+  }, [room.status, goCount, startSeconds]);
 
   if (room.status === 'starting') {
     return (

@@ -1,4 +1,19 @@
-import type { ArenaUser, RoomSummary, Transaction, WalletStats } from './types';
+import type {
+  Achievement,
+  ArenaUser,
+  GameModeMeta,
+  MatchHistoryItem,
+  NotificationEntry,
+  PaginatedMatchHistory,
+  PaginatedNotifications,
+  PlayerStats,
+  PublicPaymentMethods,
+  RoomSummary,
+  SupportTicket,
+  SupportTicketCategory,
+  Transaction,
+  WalletStats,
+} from './types';
 
 // ---------------------------------------------------------------------------
 // Bearer-token fallback transport. The primary, preferred identity transport is still the
@@ -110,4 +125,102 @@ export async function fetchRooms(): Promise<RoomSummary[]> {
   const res = await apiFetch('/api/rooms');
   const body = await parseOrThrow<{ rooms: RoomSummary[] }>(res);
   return body.rooms;
+}
+
+/** Which game modes (duel/squad) are actually enabled right now — real server config
+ *  (admin feature flags), never hardcoded client-side. */
+export async function fetchGameModes(): Promise<{ modes: GameModeMeta[]; entryFees: number[] }> {
+  const res = await apiFetch('/api/game-modes');
+  return parseOrThrow(res);
+}
+
+// ---------------------------------------------------------------------------
+// Match history + stats + achievements — all read-only, all derived server-side from the
+// real match ledger/wallet transactions.
+// ---------------------------------------------------------------------------
+export interface MatchHistoryQuery {
+  page?: number;
+  pageSize?: number;
+  format?: 'all' | 'duel' | 'squad';
+  outcome?: 'all' | 'win' | 'loss' | 'draw' | 'void';
+}
+
+export async function fetchMatchHistory(query: MatchHistoryQuery = {}): Promise<PaginatedMatchHistory> {
+  const params = new URLSearchParams();
+  if (query.page) params.set('page', String(query.page));
+  if (query.pageSize) params.set('pageSize', String(query.pageSize));
+  if (query.format) params.set('format', query.format);
+  if (query.outcome) params.set('outcome', query.outcome);
+  const res = await apiFetch(`/api/match-history?${params.toString()}`);
+  return parseOrThrow(res);
+}
+
+export async function fetchMatchDetail(roomId: string): Promise<MatchHistoryItem> {
+  const res = await apiFetch(`/api/match-history/${encodeURIComponent(roomId)}`);
+  const body = await parseOrThrow<{ match: MatchHistoryItem }>(res);
+  return body.match;
+}
+
+export async function fetchPlayerStats(): Promise<PlayerStats> {
+  const res = await apiFetch('/api/stats');
+  const body = await parseOrThrow<{ stats: PlayerStats }>(res);
+  return body.stats;
+}
+
+export async function fetchAchievements(): Promise<Achievement[]> {
+  const res = await apiFetch('/api/achievements');
+  const body = await parseOrThrow<{ achievements: Achievement[] }>(res);
+  return body.achievements;
+}
+
+// ---------------------------------------------------------------------------
+// Notifications — real events only.
+// ---------------------------------------------------------------------------
+export async function fetchNotifications(page = 1, pageSize = 20): Promise<PaginatedNotifications> {
+  const res = await apiFetch(`/api/notifications?page=${page}&pageSize=${pageSize}`);
+  return parseOrThrow(res);
+}
+
+export async function fetchUnreadNotificationCount(): Promise<number> {
+  const res = await apiFetch('/api/notifications/unread-count');
+  const body = await parseOrThrow<{ unreadCount: number }>(res);
+  return body.unreadCount;
+}
+
+export async function markNotificationRead(id: string): Promise<NotificationEntry> {
+  const res = await apiFetch(`/api/notifications/${encodeURIComponent(id)}/read`, { method: 'POST' });
+  const body = await parseOrThrow<{ notification: NotificationEntry }>(res);
+  return body.notification;
+}
+
+export async function markAllNotificationsRead(): Promise<number> {
+  const res = await apiFetch('/api/notifications/read-all', { method: 'POST' });
+  const body = await parseOrThrow<{ markedCount: number }>(res);
+  return body.markedCount;
+}
+
+// ---------------------------------------------------------------------------
+// Payment methods + support tickets.
+// ---------------------------------------------------------------------------
+export async function fetchPaymentMethods(): Promise<PublicPaymentMethods> {
+  const res = await apiFetch('/api/payment-methods');
+  return parseOrThrow(res);
+}
+
+export async function fetchSupportTickets(): Promise<SupportTicket[]> {
+  const res = await apiFetch('/api/support/tickets');
+  const body = await parseOrThrow<{ tickets: SupportTicket[] }>(res);
+  return body.tickets;
+}
+
+export async function fetchSupportTicket(id: string): Promise<SupportTicket> {
+  const res = await apiFetch(`/api/support/tickets/${encodeURIComponent(id)}`);
+  const body = await parseOrThrow<{ ticket: SupportTicket }>(res);
+  return body.ticket;
+}
+
+export async function createSupportTicket(subject: string, message: string, category: SupportTicketCategory): Promise<SupportTicket> {
+  const res = await apiFetch('/api/support/tickets', { method: 'POST', body: JSON.stringify({ subject, message, category }) });
+  const body = await parseOrThrow<{ ticket: SupportTicket }>(res);
+  return body.ticket;
 }

@@ -152,6 +152,12 @@ export interface MatchResultPlayer {
   payout: number;
   isWinner: boolean;
   connectionState: PlayerConnectionState;
+  /** Longest consecutive-correct-answer run this match — real, server-tracked round by round. */
+  maxStreak: number;
+  /** Average/fastest reaction time (ms, options-visible -> answer submitted), both server-
+   *  measured. Null if this player never answered a single round. */
+  avgReactionMs: number | null;
+  fastestReactionMs: number | null;
 }
 
 export interface MatchResultPublic {
@@ -274,4 +280,185 @@ export const TRANSACTION_LABELS: Record<TransactionType, string> = {
   payout: 'Match payout',
   platform_fee: 'Platform fee',
   signup_bonus: 'Welcome bonus',
+};
+
+// ---------------------------------------------------------------------------
+// Game mode config (mirrors server/src/admin/flags.ts via GET /api/game-modes) — whether
+// duel/squad is actually playable right now is always read from here, never hardcoded.
+// ---------------------------------------------------------------------------
+export interface GameModeMeta extends RoomFormatMeta {
+  enabled: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Match history (mirrors server/src/playerHistory.ts) — real, server-paginated/filtered.
+// ---------------------------------------------------------------------------
+export type MatchOutcome = 'win' | 'loss' | 'draw' | 'void';
+
+export interface MatchHistoryOpponent {
+  name: string;
+  score: number;
+  isWinner: boolean;
+}
+
+export interface MatchHistoryItem {
+  roomId: string;
+  format: RoomFormat;
+  formatLabel: string;
+  entryFee: number;
+  status: 'finished' | 'cancelled';
+  outcome: MatchOutcome;
+  yourScore: number | null;
+  yourCorrect: number | null;
+  yourWrong: number | null;
+  yourMaxStreak: number | null;
+  yourPayout: number | null;
+  placement: number | null;
+  playerCount: number;
+  opponents: MatchHistoryOpponent[];
+  startedAt: number | null;
+  endedAt: number;
+  durationMs: number | null;
+}
+
+export interface PaginatedMatchHistory {
+  items: MatchHistoryItem[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export const MATCH_OUTCOME_LABELS: Record<MatchOutcome, string> = {
+  win: 'Win',
+  loss: 'Loss',
+  draw: 'Draw',
+  void: 'Void (refunded)',
+};
+
+// ---------------------------------------------------------------------------
+// Lifetime stats + achievements (mirrors server/src/playerStats.ts) — always computed
+// fresh from real match/wallet history, never a client-side guess or placeholder.
+// ---------------------------------------------------------------------------
+export interface FormatStats {
+  played: number;
+  wins: number;
+  losses: number;
+  draws: number;
+}
+
+export interface PlayerStats {
+  memberSince: number;
+  gamesPlayed: number;
+  wins: number;
+  losses: number;
+  draws: number;
+  winRate: number;
+  highestScore: number;
+  highestStreak: number;
+  totalCorrect: number;
+  totalWrong: number;
+  averageScore: number;
+  averageReactionMs: number | null;
+  fastestReactionMs: number | null;
+  byFormat: Record<RoomFormat, FormatStats>;
+  totalWagered: number;
+  totalWon: number;
+  netGameProfit: number;
+}
+
+export type AchievementStatus = 'locked' | 'in_progress' | 'unlocked';
+
+export interface Achievement {
+  id: string;
+  title: string;
+  description: string;
+  status: AchievementStatus;
+  progress: { current: number; target: number };
+  unlockedAt: number | null;
+}
+
+// ---------------------------------------------------------------------------
+// Notifications (mirrors server/src/notifications.ts) — real events only.
+// ---------------------------------------------------------------------------
+export type NotificationType = 'game' | 'match' | 'wallet' | 'payment' | 'security' | 'system';
+
+export interface NotificationEntry {
+  id: string;
+  userId: string;
+  type: NotificationType;
+  title: string;
+  body: string;
+  createdAt: number;
+  read: boolean;
+  meta?: Record<string, unknown>;
+}
+
+export interface PaginatedNotifications {
+  items: NotificationEntry[];
+  total: number;
+  unreadCount: number;
+  page: number;
+  pageSize: number;
+}
+
+export const NOTIFICATION_ICONS: Record<NotificationType, string> = {
+  game: '🎮',
+  match: '⚔️',
+  wallet: '🪙',
+  payment: '💳',
+  security: '🔒',
+  system: '📣',
+};
+
+// ---------------------------------------------------------------------------
+// Payment methods (mirrors server/src/admin/payments.ts publicPaymentMethodsView) — always
+// an honest reflection of what's actually enabled server-side, never a client guess.
+// ---------------------------------------------------------------------------
+export interface PublicPaymentMethods {
+  demoWallet: { available: true; note: string };
+  upi: { enabled: boolean; minAmount: number; maxAmount: number } | null;
+  crypto: Array<{
+    asset: string;
+    network: string;
+    depositEnabled: boolean;
+    withdrawEnabled: boolean;
+    minAmount: number;
+    maxAmount: number;
+    confirmationsRequired: number;
+  }>;
+}
+
+// ---------------------------------------------------------------------------
+// Support tickets (mirrors server/src/admin/types.ts SupportTicket, player-safe subset).
+// ---------------------------------------------------------------------------
+export type SupportTicketStatus = 'open' | 'in_progress' | 'waiting' | 'resolved' | 'closed';
+export type SupportTicketCategory = 'account' | 'wallet' | 'payment' | 'gameplay' | 'other';
+
+export interface SupportTicket {
+  id: string;
+  userId: string;
+  userName: string;
+  subject: string;
+  message: string | null;
+  category: SupportTicketCategory;
+  status: SupportTicketStatus;
+  createdAt: number;
+  updatedAt: number;
+  createdByAdminId: string | null;
+}
+
+export const SUPPORT_CATEGORY_LABELS: Record<SupportTicketCategory, string> = {
+  account: 'Account',
+  wallet: 'Wallet',
+  payment: 'Payment',
+  gameplay: 'Gameplay',
+  other: 'Other',
+};
+
+export const SUPPORT_STATUS_LABELS: Record<SupportTicketStatus, string> = {
+  open: 'Open',
+  in_progress: 'In progress',
+  waiting: 'Waiting on you',
+  resolved: 'Resolved',
+  closed: 'Closed',
 };

@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import { motion } from 'framer-motion';
 import { Button } from '../../components/common/Button';
-import { WalletModal } from './WalletModal';
 import {
   GAME_KIND_TAGLINES,
   ENTRY_FEE_TIERS,
@@ -9,7 +8,7 @@ import {
   winnerShareOf,
   splitWinnerPayout,
   type ArenaUser,
-  initialsOf,
+  type GameModeMeta,
   type RoomFormat,
   type RoomFormatMeta,
   type RoomSummary,
@@ -19,39 +18,34 @@ import gameThumbnail from '../../assets/images/memory-match-thumbnail.webp';
 interface LobbyProps {
   user: ArenaUser;
   rooms: RoomSummary[];
+  gameModes: GameModeMeta[];
   busy: boolean;
   onPlay: (entryFee: number, format: RoomFormat) => void;
-  onTopUp: (amount: number) => Promise<void> | void;
-  onWithdraw: (amount: number) => Promise<void> | void;
-  onProfile: () => void;
+  onOpenWallet: () => void;
 }
 
 type FormatFilter = 'all' | RoomFormat;
 
 /** Casino-style lobby: pick a stake, hit Play — you're auto-seated at an open table for
  *  that stake, or a fresh one opens for you. No separate "create room" step, and every
- *  stake is always visible as its own table card (never an empty list). */
-export function Lobby({ user, rooms, busy, onPlay, onTopUp, onWithdraw, onProfile }: LobbyProps) {
-  const [walletOpen, setWalletOpen] = useState(false);
+ *  stake is always visible as its own table card (never an empty list). A format is only
+ *  ever offered here when the server's own config says it's enabled (see GET
+ *  /api/game-modes) — never hardcoded client-side. */
+export function Lobby({ user, rooms, gameModes, busy, onPlay, onOpenWallet }: LobbyProps) {
   const [filter, setFilter] = useState<FormatFilter>('all');
 
-  const visibleFormats = ROOM_FORMATS.filter((f) => filter === 'all' || f.id === filter);
+  const enabledFormats = ROOM_FORMATS.filter((f) => gameModes.find((m) => m.id === f.id)?.enabled !== false);
+  const visibleFormats = enabledFormats.filter((f) => filter === 'all' || f.id === filter);
 
   return (
     <div className="arena-lobby no-select">
       <header className="arena-lobby__header">
         <div>
-          <h1 className="arena-title arena-title--sm">Wager Arena</h1>
+          <h1 className="arena-title arena-title--sm">Play</h1>
           <p className="arena-subtitle arena-subtitle--sm">Hi {user.name}, pick a table and play.</p>
         </div>
         <div className="arena-lobby__header-actions">
-          <button type="button" className="arena-profile-button" onClick={onProfile} aria-label="Open profile">
-            <span className="arena-profile-button__avatar" aria-hidden="true">
-              {initialsOf(user.name)}
-            </span>
-            Profile
-          </button>
-          <button type="button" className="arena-wallet glass-panel arena-wallet--button" onClick={() => setWalletOpen(true)}>
+          <button type="button" className="arena-wallet glass-panel arena-wallet--button" onClick={onOpenWallet}>
             <span className="arena-wallet__label">Wallet</span>
             <span className="arena-wallet__value">🪙 {user.walletBalance.toLocaleString()}</span>
             <span className="arena-wallet__cta">Deposit · Withdraw · History →</span>
@@ -67,53 +61,44 @@ export function Lobby({ user, rooms, busy, onPlay, onTopUp, onWithdraw, onProfil
         </div>
       </section>
 
-      <div className="arena-format-filter" role="tablist" aria-label="Filter tables by format">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={filter === 'all'}
-          className={`arena-chip arena-format-filter__chip ${filter === 'all' ? 'arena-chip--active' : ''}`}
-          onClick={() => setFilter('all')}
-        >
-          All tables
-        </button>
-        {ROOM_FORMATS.map((f) => (
-          <button
-            key={f.id}
-            type="button"
-            role="tab"
-            aria-selected={filter === f.id}
-            className={`arena-chip arena-format-filter__chip ${filter === f.id ? 'arena-chip--active' : ''}`}
-            onClick={() => setFilter(f.id)}
-          >
-            {f.icon} {f.label}
-          </button>
-        ))}
-      </div>
+      {enabledFormats.length === 0 ? (
+        <div className="arena-empty-state glass-panel" role="status">
+          No game modes are currently enabled by the platform — please check back soon.
+        </div>
+      ) : (
+        <>
+          <div className="arena-format-filter" role="tablist" aria-label="Filter tables by format">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={filter === 'all'}
+              className={`arena-chip arena-format-filter__chip ${filter === 'all' ? 'arena-chip--active' : ''}`}
+              onClick={() => setFilter('all')}
+            >
+              All tables
+            </button>
+            {enabledFormats.map((f) => (
+              <button
+                key={f.id}
+                type="button"
+                role="tab"
+                aria-selected={filter === f.id}
+                className={`arena-chip arena-format-filter__chip ${filter === f.id ? 'arena-chip--active' : ''}`}
+                onClick={() => setFilter(f.id)}
+              >
+                {f.icon} {f.label}
+              </button>
+            ))}
+          </div>
 
-      {visibleFormats.map((format) => (
-        <FormatSection
-          key={format.id}
-          format={format}
-          rooms={rooms}
-          user={user}
-          busy={busy}
-          onPlay={onPlay}
-        />
-      ))}
-
-      <WalletModal
-        open={walletOpen}
-        user={user}
-        busy={false}
-        onTopUp={onTopUp}
-        onWithdraw={onWithdraw}
-        onClose={() => setWalletOpen(false)}
-      />
+          {visibleFormats.map((format) => (
+            <FormatSection key={format.id} format={format} rooms={rooms} user={user} busy={busy} onPlay={onPlay} />
+          ))}
+        </>
+      )}
     </div>
   );
 }
-
 
 interface FormatSectionProps {
   format: RoomFormatMeta;

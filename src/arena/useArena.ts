@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react';
-import { fetchMe, fetchRooms, fetchWallet, login as apiLogin, logout as apiLogout, signup as apiSignup, topUpWallet, withdrawWallet } from './api';
+import { fetchGameModes, fetchMe, fetchRooms, fetchWallet, login as apiLogin, logout as apiLogout, signup as apiSignup, topUpWallet, withdrawWallet } from './api';
 import { disconnectArenaSocket, getArenaSocket } from './socket';
+import { sounds } from './sound';
+import { haptics } from './haptics';
 import type {
   ArenaUser,
+  GameModeMeta,
   MatchResultPublic,
   RoomFormat,
   RoomStatePublic,
@@ -36,6 +39,10 @@ interface ArenaState {
   authenticating: boolean;
   bootstrapping: boolean;
   rooms: RoomSummary[];
+  /** Which room formats (duel/squad) are actually enabled right now — real server config,
+   *  fetched from GET /api/game-modes. Starts empty; the Play screen shows an honest
+   *  loading/empty state rather than assuming both are enabled before this resolves. */
+  gameModes: GameModeMeta[];
   room: RoomStatePublic | null;
   round: ActiveRoundView | null;
   matchResult: MatchResultPublic | null;
@@ -46,6 +53,9 @@ interface ArenaState {
    *  screen can key a one-shot entrance animation off of it instead of re-playing on every
    *  incidental room:update. */
   matchFoundToken: number;
+  /** Bumped every time a real match actually finishes — screens like the dashboard's
+   *  "recent matches" preview use this purely to know when to refetch, never as data itself. */
+  activityToken: number;
 }
 
 type Action =
@@ -56,6 +66,7 @@ type Action =
   | { type: 'LOGIN_IDLE' }
   | { type: 'WALLET_REFRESHED'; user: ArenaUser }
   | { type: 'ROOMS_LIST'; rooms: RoomSummary[] }
+  | { type: 'GAME_MODES'; modes: GameModeMeta[] }
   | { type: 'BUSY'; busy: boolean }
   | { type: 'JOIN_ROOM_SUCCESS'; room: RoomStatePublic }
   | { type: 'MATCH_FOUND'; room: RoomStatePublic }
@@ -80,6 +91,7 @@ const initialState: ArenaState = {
   authenticating: false,
   bootstrapping: true,
   rooms: [],
+  gameModes: [],
   room: null,
   round: null,
   matchResult: null,
@@ -87,6 +99,7 @@ const initialState: ArenaState = {
   notice: null,
   busy: false,
   matchFoundToken: 0,
+  activityToken: 0,
 };
 
 function reducer(state: ArenaState, action: Action): ArenaState {
@@ -105,6 +118,8 @@ function reducer(state: ArenaState, action: Action): ArenaState {
       return { ...state, user: action.user };
     case 'ROOMS_LIST':
       return { ...state, rooms: action.rooms };
+    case 'GAME_MODES':
+      return { ...state, gameModes: action.modes };
     case 'BUSY':
       return { ...state, busy: action.busy };
     case 'JOIN_ROOM_SUCCESS':
@@ -167,7 +182,7 @@ function reducer(state: ArenaState, action: Action): ArenaState {
         round: { ...state.round, resolution: { correct: false, correctToken: action.timeout.correctToken, pickedToken: null, scoreAfter: action.timeout.score } },
       };
     case 'MATCH_END':
-      return { ...state, stage: 'result', matchResult: action.result, round: null };
+      return { ...state, stage: 'result', matchResult: action.result, round: null, activityToken: state.activityToken + 1 };
     case 'RESET_TO_LOBBY':
       return { ...state, stage: 'lobby', room: null, matchResult: null, round: null };
     case 'VIEW_PROFILE':
@@ -254,13 +269,33 @@ export function useArena() {
     socket.on('connect_error', onConnectError);
 
     const onRoomUpdate = (room: RoomStatePublic) => dispatch({ type: 'ROOM_UPDATE', room });
-    const onMatchFound = (room: RoomStatePublic) => dispatch({ type: 'MATCH_FOUND', room });
+    const onMatchFound = (room: RoomStatePublic) => {
+      dispatch({ type: 'MATCH_FOUND', room });
+      if (room.status === 'ready_check') {
+        sounds.matchFound();
+        haptics.matchFound();
+      }
+    };
     const onMatchCancelled = (payload: { reason: string }) => dispatch({ type: 'MATCH_CANCELLED', reason: payload.reason });
     const onReveal = (reveal: RoundRevealPublic) => dispatch({ type: 'ROUND_REVEAL', reveal });
     const onOptions = (options: RoundOptionsPublic) => dispatch({ type: 'ROUND_OPTIONS', options });
-    const onTimeout = (timeout: RoundTimeoutPublic) => dispatch({ type: 'ROUND_TIMEOUT', timeout });
+    const onTimeout = (timeout: RoundTimeoutPublic) => {
+      dispatch({ type: 'ROUND_TIMEOUT', timeout });
+      sounds.wrong();
+      haptics.wrong();
+    };
     const onMatchEnd = (result: MatchResultPublic) => {
       dispatch({ type: 'MATCH_END', result });
+      const mine = result.results.find((r) => r.id === userRef.current?.id);
+      if (result.isDraw || result.isVoidMatch) {
+        sounds.neutral();
+      } else if (mine?.isWinner) {
+        sounds.win();
+        haptics.win();
+      } else {
+        sounds.lose();
+        haptics.lose();
+      }
       // Wallet balance changed (entry fee + possible payout/refund already applied server-side) — pull the fresh number.
       void fetchWallet().then((user) => dispatch({ type: 'WALLET_REFRESHED', user }));
     };
@@ -316,22 +351,29 @@ export function useArena() {
     }
   }, []);
 
-  const topUp = useCallback(async (amount: number) => {
+  const refreshGameModes = useCallback(async () => {
     try {
-      const user = await topUpWallet(amount, newRequestId());
-      dispatch({ type: 'WALLET_REFRESHED', user });
-    } catch (err) {
-      dispatch({ type: 'ERROR', error: err instanceof Error ? err.message : 'Deposit failed' });
+      const { modes } = await fetchGameModes();
+      dispatch({ type: 'GAME_MODES', modes });
+    } catch {
+      // Transient network hiccup — the Play screen keeps whatever it last knew.
     }
   }, []);
 
+  // Deliberately RE-THROW on failure (unlike most other actions here) rather than only
+  // dispatching the global error toast — the Wallet screen's deposit/withdraw forms show
+  // the failure inline, right next to the amount the player just tried, which is far
+  // clearer for a financial action than a toast at the top of the screen. Success is only
+  // ever reported by the caller after this promise genuinely resolves with the server's
+  // own updated balance — never assumed.
+  const topUp = useCallback(async (amount: number) => {
+    const user = await topUpWallet(amount, newRequestId());
+    dispatch({ type: 'WALLET_REFRESHED', user });
+  }, []);
+
   const withdraw = useCallback(async (amount: number) => {
-    try {
-      const user = await withdrawWallet(amount, newRequestId());
-      dispatch({ type: 'WALLET_REFRESHED', user });
-    } catch (err) {
-      dispatch({ type: 'ERROR', error: err instanceof Error ? err.message : 'Withdrawal failed' });
-    }
+    const user = await withdrawWallet(amount, newRequestId());
+    dispatch({ type: 'WALLET_REFRESHED', user });
   }, []);
 
   /**
@@ -388,6 +430,13 @@ export function useArena() {
     });
     if (ack.ok && ack.correct !== undefined && ack.correctToken !== undefined && ack.score !== undefined) {
       dispatch({ type: 'ROUND_ANSWERED', roundId: round.roundId, correct: ack.correct, correctToken: ack.correctToken, pickedToken: optionToken, score: ack.score });
+      if (ack.correct) {
+        sounds.correct();
+        haptics.correct();
+      } else {
+        sounds.wrong();
+        haptics.wrong();
+      }
     } else if (!ack.ok && ack.error) {
       // Surfaced so a genuinely confusing rejection (e.g. clock skew) isn't silent — most
       // rejections in normal play are prevented client-side before this point (see
@@ -437,6 +486,7 @@ export function useArena() {
     login,
     signup,
     refreshRooms,
+    refreshGameModes,
     topUp,
     withdraw,
     joinQueue,

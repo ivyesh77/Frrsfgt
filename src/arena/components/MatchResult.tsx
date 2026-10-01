@@ -33,6 +33,14 @@ export function MatchResult({ result, user, busy, onBackToLobby, onRematch }: Ma
 
         {isDuel ? <DuelHeadline result={result} myResult={myResult} /> : <SquadHeadline myRank={myRank} isVoid={result.isVoidMatch} />}
 
+        {myResult && (myResult.maxStreak > 0 || myResult.avgReactionMs !== null) && (
+          <div className="arena-performance-row">
+            {myResult.maxStreak > 0 && <span>🔥 Best streak: {myResult.maxStreak}</span>}
+            {myResult.avgReactionMs !== null && <span>⚡ Avg. reaction: {(myResult.avgReactionMs / 1000).toFixed(2)}s</span>}
+            {myResult.fastestReactionMs !== null && <span>🚀 Fastest: {(myResult.fastestReactionMs / 1000).toFixed(2)}s</span>}
+          </div>
+        )}
+
         <ul className="arena-result-list">
           {ranked.map((r, i) => (
             <motion.li
@@ -54,6 +62,7 @@ export function MatchResult({ result, user, busy, onBackToLobby, onRematch }: Ma
               <span className="arena-result-list__score">{r.score} pts</span>
               <span className="arena-result-list__meta">
                 ✓{r.correct} ✕{r.wrong}
+                {r.maxStreak > 1 && ` · 🔥${r.maxStreak}`}
               </span>
               <span className="arena-result-list__payout">{r.payout > 0 ? `+🪙 ${r.payout.toLocaleString()}` : '—'}</span>
             </motion.li>

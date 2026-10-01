@@ -1,75 +1,52 @@
 import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
-import { Button } from '../../components/common/Button';
-import { fetchWalletStats } from '../api';
-import { WalletModal } from './WalletModal';
-import { coinWalletId, initialsOf, type ArenaUser, type WalletStats } from '../types';
+import { coinWalletId, initialsOf, type ArenaUser, type PlayerStats } from '../types';
+import { fetchPlayerStats } from '../api';
 
 interface ProfileScreenProps {
   user: ArenaUser;
-  onBack: () => void;
+  onOpenWallet: () => void;
+  onOpenStats: () => void;
+  onOpenAchievements: () => void;
+  onOpenHistory: () => void;
+  onOpenSettings: () => void;
+  onOpenSupport: () => void;
   onLogout: () => Promise<void> | void;
-  onTopUp: (amount: number) => Promise<void> | void;
-  onWithdraw: (amount: number) => Promise<void> | void;
 }
 
 function formatDate(ts: number): string {
   return new Date(ts).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
 }
 
-/** Player profile: identity, ArenaCoin wallet shortcut, and lifetime stats (matches
- *  played, win rate, total wagered/won, net profit) computed from the full ledger. */
-export function ProfileScreen({ user, onBack, onLogout, onTopUp, onWithdraw }: ProfileScreenProps) {
-  const [stats, setStats] = useState<WalletStats | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [walletOpen, setWalletOpen] = useState(false);
+/** Player profile: identity + wallet shortcut + a compact real stats preview, with links
+ *  out to the full Stats, Achievements, History, Settings, and Support screens (all reached
+ *  through the persistent nav shell everywhere else in the app too). */
+export function ProfileScreen({ user, onOpenWallet, onOpenStats, onOpenAchievements, onOpenHistory, onOpenSettings, onOpenSupport, onLogout }: ProfileScreenProps) {
+  const [stats, setStats] = useState<PlayerStats | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    // Intentional: this effect synchronizes with the external wallet-stats API each time the
-    // user id changes or the balance changes after a deposit/withdrawal — the loading/error
-    // flags reset per-fetch.
-    // eslint-disable-next-line react/set-state-in-effect
-    setLoading(true);
-    setLoadError(null);
-    fetchWalletStats()
+    fetchPlayerStats()
       .then((s) => {
         if (!cancelled) setStats(s);
       })
-      .catch((err) => {
-        if (!cancelled) setLoadError(err instanceof Error ? err.message : 'Could not load profile stats');
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
+      .catch(() => {
+        // Non-critical preview — the full Stats screen will surface a real error if this keeps failing.
       });
     return () => {
       cancelled = true;
     };
-  }, [user.id, user.walletBalance]);
+  }, [user.id]);
 
-  const winRate = stats && stats.matchesPlayed > 0 ? Math.round((stats.wins / stats.matchesPlayed) * 100) : null;
+  const winRate = stats && stats.gamesPlayed > 0 ? Math.round(stats.winRate * 100) : null;
 
   return (
-    <div className="arena-lobby profile-screen no-select">
-      <header className="arena-lobby__header">
-        <div>
-          <button type="button" className="profile-back" onClick={onBack}>
-            ← Back to Lobby
-          </button>
-          <h1 className="arena-title arena-title--sm">Profile</h1>
-        </div>
-        <Button variant="danger" size="md" onClick={() => void onLogout()}>
-          Log Out
-        </Button>
+    <div className="profile-screen no-select">
+      <header className="screen-header">
+        <h1 className="arena-title arena-title--sm">Profile</h1>
       </header>
 
-      <motion.section
-        className="profile-card glass-panel"
-        initial={{ opacity: 0, y: 12 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.3 }}
-      >
+      <motion.section className="profile-card glass-panel" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }}>
         <div className="profile-avatar" aria-hidden="true">
           {initialsOf(user.name)}
         </div>
@@ -81,70 +58,52 @@ export function ProfileScreen({ user, onBack, onLogout, onTopUp, onWithdraw }: P
         <div className="profile-balance">
           <span className="profile-balance__label">Wallet balance</span>
           <span className="profile-balance__value">🪙 {user.walletBalance.toLocaleString()} ARC</span>
-          <Button variant="secondary" size="md" onClick={() => setWalletOpen(true)}>
-            Deposit / Withdraw
-          </Button>
+          <button type="button" className="dash-section__link" onClick={onOpenWallet}>
+            Open Wallet →
+          </button>
         </div>
       </motion.section>
 
-      <section className="arena-section">
-        <h2 className="arena-section__title">Lifetime stats</h2>
-
-        {loading && <p className="arena-empty">Loading stats…</p>}
-        {loadError && <p className="arena-fineprint arena-fineprint--warn">{loadError}</p>}
-
-        {stats && !loading && !loadError && (
-          <div className="profile-stats-grid">
-            <div className="profile-stat glass-panel">
-              <span className="profile-stat__label">Matches played</span>
-              <span className="profile-stat__value">{stats.matchesPlayed.toLocaleString()}</span>
-            </div>
-            <div className="profile-stat glass-panel">
-              <span className="profile-stat__label">Wins</span>
-              <span className="profile-stat__value">{stats.wins.toLocaleString()}</span>
-            </div>
-            <div className="profile-stat glass-panel">
-              <span className="profile-stat__label">Win rate</span>
-              <span className="profile-stat__value">{winRate === null ? '—' : `${winRate}%`}</span>
-            </div>
-            <div className="profile-stat glass-panel">
-              <span className="profile-stat__label">Total wagered</span>
-              <span className="profile-stat__value">🪙 {stats.totalWagered.toLocaleString()}</span>
-            </div>
-            <div className="profile-stat glass-panel">
-              <span className="profile-stat__label">Total won</span>
-              <span className="profile-stat__value">🪙 {stats.totalWon.toLocaleString()}</span>
-            </div>
-            <div className="profile-stat glass-panel">
-              <span className="profile-stat__label">Net profit / loss</span>
-              <span
-                className={`profile-stat__value ${
-                  stats.netGameProfit > 0 ? 'profile-stat__value--positive' : stats.netGameProfit < 0 ? 'profile-stat__value--negative' : ''
-                }`}
-              >
-                {stats.netGameProfit > 0 ? '+' : ''}🪙 {stats.netGameProfit.toLocaleString()}
-              </span>
-            </div>
-            <div className="profile-stat glass-panel">
-              <span className="profile-stat__label">Total deposited</span>
-              <span className="profile-stat__value">🪙 {stats.totalDeposited.toLocaleString()}</span>
-            </div>
-            <div className="profile-stat glass-panel">
-              <span className="profile-stat__label">Total withdrawn</span>
-              <span className="profile-stat__value">🪙 {stats.totalWithdrawn.toLocaleString()}</span>
-            </div>
-          </div>
-        )}
+      <section className="profile-quick-stats">
+        <div className="profile-stat glass-panel">
+          <span className="profile-stat__label">Matches</span>
+          <span className="profile-stat__value">{stats ? stats.gamesPlayed.toLocaleString() : '—'}</span>
+        </div>
+        <div className="profile-stat glass-panel">
+          <span className="profile-stat__label">Win rate</span>
+          <span className="profile-stat__value">{winRate === null ? '—' : `${winRate}%`}</span>
+        </div>
+        <div className="profile-stat glass-panel">
+          <span className="profile-stat__label">Best streak</span>
+          <span className="profile-stat__value">{stats ? stats.highestStreak.toLocaleString() : '—'}</span>
+        </div>
       </section>
 
-      <WalletModal
-        open={walletOpen}
-        user={user}
-        busy={false}
-        onTopUp={onTopUp}
-        onWithdraw={onWithdraw}
-        onClose={() => setWalletOpen(false)}
-      />
+      <nav className="profile-links" aria-label="Profile sections">
+        <ProfileLink icon="📊" label="Full Stats" onClick={onOpenStats} />
+        <ProfileLink icon="🏆" label="Achievements" onClick={onOpenAchievements} />
+        <ProfileLink icon="📜" label="Match History" onClick={onOpenHistory} />
+        <ProfileLink icon="⚙️" label="Settings" onClick={onOpenSettings} />
+        <ProfileLink icon="🆘" label="Help & Support" onClick={onOpenSupport} />
+      </nav>
+
+      <button type="button" className="profile-logout-link" onClick={() => void onLogout()}>
+        Log Out
+      </button>
     </div>
+  );
+}
+
+function ProfileLink({ icon, label, onClick }: { icon: string; label: string; onClick: () => void }) {
+  return (
+    <button type="button" className="profile-link glass-panel" onClick={onClick}>
+      <span className="profile-link__icon" aria-hidden="true">
+        {icon}
+      </span>
+      <span className="profile-link__label">{label}</span>
+      <span className="profile-link__chevron" aria-hidden="true">
+        →
+      </span>
+    </button>
   );
 }
