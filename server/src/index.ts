@@ -146,6 +146,37 @@ function setSessionCookie(res: Response, token: string, req: Request): void {
   });
 }
 
+// ---------------------------------------------------------------------------
+// TEMPORARY auth diagnostics (point 15 of the session-expiry audit). Opt-in via
+// AUTH_DEBUG=1 so it never spams production logs by default, but can be flipped on in
+// this environment while the "Session Expired" report is being chased down. Logs ONLY:
+// a per-request id, the endpoint, which credential transport was present (boolean, never
+// the value), whether auth succeeded, and — on failure — a specific machine-readable
+// reason (missing/expired/invalid/mismatched-env). NEVER logs the password, the session
+// token/cookie value, or anything else that would let a log reader impersonate a session.
+// Remove this block (and its two call sites below) once the real root cause is found.
+// ---------------------------------------------------------------------------
+const AUTH_DEBUG = process.env.AUTH_DEBUG === '1';
+let authDebugCounter = 0;
+
+interface AuthDebugInfo {
+  reqId: string;
+  endpoint: string;
+  hadBearer: boolean;
+  hadCookie: boolean;
+  origin: string | undefined;
+  result: 'authenticated' | 'unauthenticated' | 'success';
+  reason?: string;
+}
+
+function logAuthEvent(info: AuthDebugInfo): void {
+  if (!AUTH_DEBUG) return;
+  // eslint-disable-next-line no-console
+  console.log(
+    `[auth-debug] #${info.reqId} ${info.endpoint} origin=${info.origin ?? 'none'} bearer=${info.hadBearer} cookie=${info.hadCookie} -> ${info.result}${info.reason ? ` (${info.reason})` : ''}`,
+  );
+}
+
 function requireAuth(req: Request, res: Response, next: NextFunction): void {
   // Prefer an explicit `Authorization: Bearer <token>` header when present, falling back
   // to the cookie. Both carry exactly the same kind of opaque, server-issued, unguessable
@@ -162,11 +193,30 @@ function requireAuth(req: Request, res: Response, next: NextFunction): void {
   const authHeader = req.headers.authorization;
   const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice('Bearer '.length) : undefined;
   const cookieToken = req.cookies?.[SESSION_COOKIE] as string | undefined;
-  const userId = resolveSession(bearerToken ?? cookieToken);
+  const presentedToken = bearerToken ?? cookieToken;
+  const userId = resolveSession(presentedToken);
+  const reqId = `r${++authDebugCounter}`;
   if (!userId) {
+    logAuthEvent({
+      reqId,
+      endpoint: `${req.method} ${req.path}`,
+      hadBearer: Boolean(bearerToken),
+      hadCookie: Boolean(cookieToken),
+      origin: req.headers.origin,
+      result: 'unauthenticated',
+      reason: !presentedToken ? 'no-credential-presented' : 'token-not-found-or-expired',
+    });
     res.status(401).json({ error: 'Not authenticated' });
     return;
   }
+  logAuthEvent({
+    reqId,
+    endpoint: `${req.method} ${req.path}`,
+    hadBearer: Boolean(bearerToken),
+    hadCookie: Boolean(cookieToken),
+    origin: req.headers.origin,
+    result: 'authenticated',
+  });
   req.userId = userId;
   next();
 }
@@ -225,6 +275,7 @@ app.post('/api/auth/signup', signupLimiter, async (req, res) => {
     const { token } = createSession(user.id);
     setSessionCookie(res, token, req);
     appendLoginAttempt({ id: nanoid(10), actor: 'player', usernameAttempted: name, success: true, timestamp: Date.now(), ip: req.ip ?? 'unknown' });
+    logAuthEvent({ reqId: `r${++authDebugCounter}`, endpoint: 'POST /api/auth/signup', hadBearer: false, hadCookie: false, origin: req.headers.origin, result: 'success' });
     // `token` is also returned in the body as a fallback transport for exactly the
     // scenario described on requireAuth() above (cross-site-iframe cookie blocking). The
     // client mirrors this into sessionStorage, NOT localStorage (see src/arena/api.ts for
@@ -249,9 +300,19 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
     const { token } = createSession(user.id);
     setSessionCookie(res, token, req);
     appendLoginAttempt({ id: nanoid(10), actor: 'player', usernameAttempted: name, success: true, timestamp: Date.now(), ip: req.ip ?? 'unknown' });
+    logAuthEvent({ reqId: `r${++authDebugCounter}`, endpoint: 'POST /api/auth/login', hadBearer: false, hadCookie: false, origin: req.headers.origin, result: 'success' });
     res.json({ user: toPublicUser(user), token });
   } catch (err) {
     appendLoginAttempt({ id: nanoid(10), actor: 'player', usernameAttempted: name, success: false, timestamp: Date.now(), ip: req.ip ?? 'unknown' });
+    logAuthEvent({
+      reqId: `r${++authDebugCounter}`,
+      endpoint: 'POST /api/auth/login',
+      hadBearer: false,
+      hadCookie: false,
+      origin: req.headers.origin,
+      result: 'unauthenticated',
+      reason: err instanceof InvalidCredentialsError ? 'bad-credentials' : err instanceof AccountSuspendedError ? 'account-suspended' : 'bad-request',
+    });
     if (err instanceof InvalidCredentialsError) return res.status(401).json({ error: err.message });
     if (err instanceof AccountSuspendedError) return res.status(403).json({ error: err.message });
     res.status(400).json({ error: err instanceof Error ? err.message : 'Log in failed' });
@@ -264,6 +325,14 @@ app.post('/api/auth/logout', (req, res) => {
   const cookieToken = req.cookies?.[SESSION_COOKIE] as string | undefined;
   destroySession(bearerToken ?? cookieToken);
   res.clearCookie(SESSION_COOKIE, { path: '/' });
+  logAuthEvent({
+    reqId: `r${++authDebugCounter}`,
+    endpoint: 'POST /api/auth/logout',
+    hadBearer: Boolean(bearerToken),
+    hadCookie: Boolean(cookieToken),
+    origin: req.headers.origin,
+    result: 'success',
+  });
   res.json({ ok: true });
 });
 
@@ -438,11 +507,30 @@ io.use((socket, next) => {
     .map((p) => p.trim())
     .find((p) => p.startsWith(`${SESSION_COOKIE}=`))
     ?.slice(SESSION_COOKIE.length + 1);
-  const userId = resolveSession(authToken ?? (cookieToken ? decodeURIComponent(cookieToken) : undefined));
+  const presentedToken = authToken ?? (cookieToken ? decodeURIComponent(cookieToken) : undefined);
+  const userId = resolveSession(presentedToken);
+  const reqId = `s${++authDebugCounter}`;
   if (!userId) {
+    logAuthEvent({
+      reqId,
+      endpoint: 'SOCKET handshake',
+      hadBearer: Boolean(authToken),
+      hadCookie: Boolean(cookieToken),
+      origin: socket.handshake.headers.origin,
+      result: 'unauthenticated',
+      reason: !presentedToken ? 'no-credential-presented' : 'token-not-found-or-expired',
+    });
     next(new Error('Unauthorized'));
     return;
   }
+  logAuthEvent({
+    reqId,
+    endpoint: 'SOCKET handshake',
+    hadBearer: Boolean(authToken),
+    hadCookie: Boolean(cookieToken),
+    origin: socket.handshake.headers.origin,
+    result: 'authenticated',
+  });
   socket.data.userId = userId;
   next();
 });
