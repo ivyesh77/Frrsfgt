@@ -231,10 +231,28 @@ export function useArena() {
   // Wallet, ...). Guarded on userRef so this can never misfire for the ordinary, expected 401
   // a bad-password login/signup attempt returns before any session exists yet. -------------
   useEffect(() => {
+    let confirming = false;
     setUnauthorizedHandler(() => {
       if (!userRef.current) return; // never logged in this tab yet — not a real expiry
-      disconnectArenaSocket();
-      dispatch({ type: 'SESSION_EXPIRED' });
+      if (confirming) return; // a burst of several 401s at once only needs one re-check
+      confirming = true;
+      // A single 401 is re-confirmed directly with the server (GET /api/auth/me) before
+      // bouncing anyone to the login screen — a lone request racing a just-completed
+      // login/reconnect, or one dropped packet, must never log out someone whose session
+      // is still genuinely valid. Only a confirmed, repeat "no" from the server itself
+      // (or that confirmation call failing the same way) is treated as a real expiry.
+      void fetchMe()
+        .then((user) => {
+          confirming = false;
+          if (user) return; // double-checked: the session is actually still fine
+          disconnectArenaSocket();
+          dispatch({ type: 'SESSION_EXPIRED' });
+        })
+        .catch(() => {
+          confirming = false;
+          disconnectArenaSocket();
+          dispatch({ type: 'SESSION_EXPIRED' });
+        });
     });
     return () => setUnauthorizedHandler(null);
   }, []);
