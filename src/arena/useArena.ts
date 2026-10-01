@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useReducer, useRef } from 'react';
-import { fetchGameModes, fetchMe, fetchRooms, fetchWallet, login as apiLogin, logout as apiLogout, setUnauthorizedHandler, signup as apiSignup, topUpWallet, withdrawWallet } from './api';
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import { fetchGameModes, fetchRooms, fetchWallet, topUpWallet, withdrawWallet } from './api';
+import { authStore, useAuthState } from './authStore';
 import { disconnectArenaSocket, getArenaSocket } from './socket';
 import { sounds } from './sound';
 import { haptics } from './haptics';
@@ -17,6 +18,11 @@ import type {
 
 export type ArenaStage = 'login' | 'lobby' | 'room' | 'result' | 'profile';
 
+/** The game-navigation-only subset of ArenaStage — 'login' is never stored here, it is
+ *  always derived from auth status (see useArena() below), so there is exactly one place
+ *  that can ever decide "show the login screen" instead of two independent opinions. */
+type GameStage = Exclude<ArenaStage, 'login'>;
+
 /** One in-flight (or just-resolved) round, tracked entirely from server-pushed events —
  *  nothing here is computed or asserted by the client. `phase` mirrors which event was
  *  most recently received for this `roundId`. */
@@ -33,11 +39,13 @@ export interface ActiveRoundView {
   resolution: { correct: boolean; correctToken: string; pickedToken: string | null; scoreAfter: number } | null;
 }
 
+/**
+ * Purely the GAME/NAVIGATION slice now — login/logout/session-expiry/bootstrap state lives
+ * exclusively in authStore.ts (see that file's top comment for why this was split out).
+ * `useArena()` below combines the two for backwards-compatible consumption by ArenaApp.tsx.
+ */
 interface ArenaState {
-  stage: ArenaStage;
-  user: ArenaUser | null;
-  authenticating: boolean;
-  bootstrapping: boolean;
+  stage: GameStage;
   rooms: RoomSummary[];
   /** Which room formats (duel/squad) are actually enabled right now — real server config,
    *  fetched from GET /api/game-modes. Starts empty; the Play screen shows an honest
@@ -49,16 +57,6 @@ interface ArenaState {
   error: string | null;
   notice: string | null;
   busy: boolean;
-  /** Set only when the initial "are we already logged in?" check (GET /api/auth/me) could
-   *  not get a definitive answer after retrying — a network error, or a 403/429/500/502/503
-   *  from the server itself. This is deliberately NOT the same as "not authenticated": a
-   *  confirmed 401 clears this and shows the ordinary login screen, but an inconclusive
-   *  check must never silently render as "please log in" (that would be indistinguishable
-   *  from a real logout to the player, even though their session may still be perfectly
-   *  valid) and must never render as "logged in" either (that would be an unverified, fake
-   *  logged-in state). Instead the UI shows an explicit "can't reach the server" screen
-   *  with a manual retry action. */
-  bootstrapError: string | null;
   /** Bumped every time a fresh `match:found` event arrives, purely so the matchmaking
    *  screen can key a one-shot entrance animation off of it instead of re-playing on every
    *  incidental room:update. */
@@ -69,14 +67,6 @@ interface ArenaState {
 }
 
 type Action =
-  | { type: 'BOOTSTRAP_DONE'; user: ArenaUser | null }
-  | { type: 'BOOTSTRAP_ERROR'; error: string }
-  | { type: 'BOOTSTRAP_RETRY' }
-  | { type: 'LOGIN_START' }
-  | { type: 'LOGIN_SUCCESS'; user: ArenaUser }
-  | { type: 'LOGIN_ERROR'; error: string }
-  | { type: 'LOGIN_IDLE' }
-  | { type: 'WALLET_REFRESHED'; user: ArenaUser }
   | { type: 'ROOMS_LIST'; rooms: RoomSummary[] }
   | { type: 'GAME_MODES'; modes: GameModeMeta[] }
   | { type: 'BUSY'; busy: boolean }
@@ -92,16 +82,12 @@ type Action =
   | { type: 'MATCH_END'; result: MatchResultPublic }
   | { type: 'RESET_TO_LOBBY' }
   | { type: 'VIEW_PROFILE' }
-  | { type: 'LOGOUT' }
-  | { type: 'SESSION_EXPIRED' }
+  | { type: 'RESET_GAME_STATE' }
   | { type: 'ERROR'; error: string | null }
   | { type: 'DISMISS_NOTICE' };
 
 const initialState: ArenaState = {
-  stage: 'login',
-  user: null,
-  authenticating: false,
-  bootstrapping: true,
+  stage: 'lobby',
   rooms: [],
   gameModes: [],
   room: null,
@@ -112,29 +98,10 @@ const initialState: ArenaState = {
   busy: false,
   matchFoundToken: 0,
   activityToken: 0,
-  bootstrapError: null,
 };
 
 function reducer(state: ArenaState, action: Action): ArenaState {
   switch (action.type) {
-    case 'BOOTSTRAP_DONE':
-      return action.user
-        ? { ...state, user: action.user, stage: 'lobby', bootstrapping: false, bootstrapError: null }
-        : { ...state, bootstrapping: false, bootstrapError: null };
-    case 'BOOTSTRAP_ERROR':
-      return { ...state, bootstrapping: false, bootstrapError: action.error };
-    case 'BOOTSTRAP_RETRY':
-      return { ...state, bootstrapping: true, bootstrapError: null };
-    case 'LOGIN_START':
-      return { ...state, authenticating: true, error: null };
-    case 'LOGIN_SUCCESS':
-      return { ...state, authenticating: false, user: action.user, stage: 'lobby', error: null };
-    case 'LOGIN_ERROR':
-      return { ...state, authenticating: false, error: action.error };
-    case 'LOGIN_IDLE':
-      return { ...state, authenticating: false };
-    case 'WALLET_REFRESHED':
-      return { ...state, user: action.user };
     case 'ROOMS_LIST':
       return { ...state, rooms: action.rooms };
     case 'GAME_MODES':
@@ -206,10 +173,11 @@ function reducer(state: ArenaState, action: Action): ArenaState {
       return { ...state, stage: 'lobby', room: null, matchResult: null, round: null };
     case 'VIEW_PROFILE':
       return { ...state, stage: 'profile', error: null };
-    case 'LOGOUT':
-      return { ...initialState, bootstrapping: false };
-    case 'SESSION_EXPIRED':
-      return { ...initialState, bootstrapping: false, error: 'Your session expired — please sign in again.' };
+    case 'RESET_GAME_STATE':
+      // Fired whenever auth transitions away from 'authenticated' (explicit logout, or a
+      // confirmed session expiry) — the game/navigation slice has no business remembering
+      // a stale room/rooms-list/match-result from the previous account once that happens.
+      return { ...initialState };
     case 'ERROR':
       return { ...state, error: action.error, busy: false };
     case 'DISMISS_NOTICE':
@@ -234,98 +202,48 @@ function newRequestId(): string {
 }
 
 export function useArena() {
+  // Auth/session truth lives entirely in authStore.ts now (see that file's top comment) —
+  // this hook just subscribes to it. There is no more local bootstrap/login/logout/401
+  // handling logic duplicated here; `auth.user`/`auth.status` are the only things this
+  // file ever reads to know who (if anyone) is logged in.
+  const auth = useAuthState();
+  const [authenticating, setAuthenticating] = useState(false);
+
   const [state, dispatch] = useReducer(reducer, initialState);
   const userRef = useRef<ArenaUser | null>(null);
   const roomRef = useRef<RoomStatePublic | null>(null);
   const roundRef = useRef<ActiveRoundView | null>(null);
   useEffect(() => {
-    userRef.current = state.user;
+    userRef.current = auth.user;
     roomRef.current = state.room;
     roundRef.current = state.round;
-  }, [state.user, state.room, state.round]);
+  }, [auth.user, state.room, state.round]);
 
-  // --- Any REST call that needed an authenticated session but got a 401 back (session
-  // expired/revoked server-side, e.g. a restart) now bounces here instead of leaving a raw
-  // "Not authenticated" error stranded on whichever screen asked first (Stats, Achievements,
-  // Wallet, ...). Guarded on userRef so this can never misfire for the ordinary, expected 401
-  // a bad-password login/signup attempt returns before any session exists yet. -------------
+  // The game/navigation slice has no business surviving a logout or a confirmed session
+  // expiry from a previous account — reset it the moment auth stops being 'authenticated'.
+  const wasAuthenticated = useRef(false);
   useEffect(() => {
-    let confirming = false;
-    setUnauthorizedHandler(() => {
-      if (!userRef.current) return; // never logged in this tab yet — not a real expiry
-      if (confirming) return; // a burst of several 401s at once only needs one re-check
-      confirming = true;
-      // A single 401 is re-confirmed directly with the server (GET /api/auth/me) before
-      // bouncing anyone to the login screen — a lone request racing a just-completed
-      // login/reconnect, or one dropped packet, must never log out someone whose session
-      // is still genuinely valid. Only an explicit, clean "no" from that confirmation call
-      // (fetchMe() resolving to null, i.e. the server itself returned 401 again) is ever
-      // treated as a real expiry. Any OTHER failure here (a network blip, the dev server
-      // briefly restarting, a transient 5xx) is inconclusive, NOT a confirmed expiry — it
-      // must never log out someone who may still have a perfectly valid session; the
-      // screen that hit the original error can show/retry its own local error as before.
-      void fetchMe()
-        .then((user) => {
-          confirming = false;
-          if (user) return; // double-checked: the session is actually still fine
-          disconnectArenaSocket();
-          dispatch({ type: 'SESSION_EXPIRED' });
-        })
-        .catch(() => {
-          confirming = false; // inconclusive — leave the session alone, do not log out
-        });
-    });
-    return () => setUnauthorizedHandler(null);
-  }, []);
+    if (auth.status === 'authenticated') {
+      wasAuthenticated.current = true;
+    } else if (wasAuthenticated.current) {
+      wasAuthenticated.current = false;
+      disconnectArenaSocket();
+      dispatch({ type: 'RESET_GAME_STATE' });
+    }
+  }, [auth.status]);
 
-  // --- Bootstrap: ask the server (via the httpOnly session cookie) whether we're already
-  // logged in. There is no client-side identity cache anymore — a stored user id/name in
-  // localStorage was itself part of the audited trust-model problem, so the browser now
-  // holds no opinion about who is logged in beyond what the server's session says. ------
-  const bootstrapRunIdRef = useRef(0);
-  const runBootstrap = useCallback(() => {
-    const runId = ++bootstrapRunIdRef.current;
-    const attemptsBeforeGivingUp = 3;
-    const backoffMs = [500, 1500, 3000];
-
-    const attempt = (n: number) => {
-      // If a newer bootstrap run (e.g. the user clicked "retry") has started since this one
-      // was scheduled, let that one win — never let a stale retry chain overwrite it.
-      if (bootstrapRunIdRef.current !== runId) return;
-      fetchMe()
-        .then((user) => {
-          // A clean result (either a real user, or an explicit "no" from a confirmed 401)
-          // is always definitive — never retried, never treated as an error.
-          if (bootstrapRunIdRef.current === runId) dispatch({ type: 'BOOTSTRAP_DONE', user });
-        })
-        .catch((err) => {
-          if (bootstrapRunIdRef.current !== runId) return;
-          // Anything that THROWS here is, by construction (see fetchMe()), not a 401 — it's
-          // a network error, or a 403/429/500/502/503 from the server. None of those mean
-          // "log the user out" or "show the login form" — they mean "we don't know yet".
-          // Retry a bounded number of times with backoff (never forever) before surfacing
-          // an explicit connection-problem state instead of silently guessing either way.
-          if (n < attemptsBeforeGivingUp - 1) {
-            window.setTimeout(() => attempt(n + 1), backoffMs[n] ?? 3000);
-            return;
-          }
-          const message = err instanceof Error ? err.message : 'Could not reach the server';
-          dispatch({ type: 'BOOTSTRAP_ERROR', error: message });
-        });
-    };
-    attempt(0);
-  }, []);
-
+  // --- Bootstrap: ask the server (via the httpOnly session cookie / bearer token) whether
+  // we're already logged in. Exactly one call, on mount — see authStore.bootstrap(). There
+  // is no client-side identity cache: the browser holds no opinion about who is logged in
+  // beyond what the server's session says. ------------------------------------------------
   useEffect(() => {
-    runBootstrap();
+    void authStore.bootstrap();
     // Mount-only: this is the one-time "are we already logged in?" check on page load.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const retryBootstrap = useCallback(() => {
-    dispatch({ type: 'BOOTSTRAP_RETRY' });
-    runBootstrap();
-  }, [runBootstrap]);
+    authStore.retryBootstrap();
+  }, []);
 
   // --- Socket event wiring — only ever connects once we actually have an authenticated
   // session; the server would reject an unauthenticated socket anyway (see socket.ts).
@@ -334,21 +252,21 @@ export function useArena() {
   // authoritatively part of and push a fresh `room:update` — that's what lets a genuine
   // mid-match reconnect resume seamlessly without the client asking for anything. ---------
   useEffect(() => {
-    if (!state.user) return;
+    if (auth.status !== 'authenticated') return;
     const socket = getArenaSocket();
 
-    // If the socket's session cookie is ever stale/invalid by the time it reaches the
+    // If the socket's session cookie/token is ever stale/invalid by the time it reaches the
     // server (e.g. the server process restarted since this tab logged in, or the session
     // simply expired), the server's io.use() middleware rejects the handshake outright.
     // Without handling this, every subsequent emit (queue:join, rooms:ready, ...) would
     // just sit forever waiting for an ack that will never come — from the player's
-    // perspective, clicking "Find Match" would silently do nothing. Instead, treat it the
-    // same as being logged out: bounce back to the login screen with a clear message so
-    // the user can sign back in and get a fresh, valid session immediately.
+    // perspective, clicking "Find Match" would silently do nothing. This does NOT
+    // immediately log anyone out — it routes through the exact same confirmExpiryOrIgnore()
+    // that a REST 401 does, so a transient hiccup (e.g. the socket racing a just-completed
+    // login) is re-confirmed against the server before ever actually bouncing to login.
     const onConnectError = (err: Error) => {
       if (err.message !== 'Unauthorized') return; // transient network hiccup — socket.io will retry on its own
-      disconnectArenaSocket();
-      dispatch({ type: 'SESSION_EXPIRED' });
+      void authStore.confirmExpiryOrIgnore();
     };
     socket.on('connect_error', onConnectError);
 
@@ -381,7 +299,7 @@ export function useArena() {
         haptics.lose();
       }
       // Wallet balance changed (entry fee + possible payout/refund already applied server-side) — pull the fresh number.
-      void fetchWallet().then((user) => dispatch({ type: 'WALLET_REFRESHED', user }));
+      void fetchWallet().then((user) => authStore.updateUser(user));
     };
 
     socket.on('room:update', onRoomUpdate);
@@ -402,27 +320,31 @@ export function useArena() {
       socket.off('match:round:timeout', onTimeout);
       socket.off('match:end', onMatchEnd);
     };
-  }, [state.user]);
+  }, [auth.status]);
 
+  // login()/signup() delegate entirely to authStore — the exact sequence required is:
+  // call the real endpoint -> on success the store immediately reflects 'authenticated'
+  // with the server's own returned user (verified identity, never an optimistic guess) ->
+  // the bootstrap-time GET /me has ALREADY run before this screen was even reachable (the
+  // login form cannot render until bootstrap resolves — see ArenaApp.tsx), so there is no
+  // window where a stale pre-login check can race a fresh login. On failure the original
+  // error is re-thrown as-is for AuthModal's own inline error display — never a generic
+  // "session expired" message.
   const login = useCallback(async (name: string, password: string) => {
-    dispatch({ type: 'LOGIN_START' });
+    setAuthenticating(true);
     try {
-      const user = await apiLogin(name, password);
-      dispatch({ type: 'LOGIN_SUCCESS', user });
-    } catch (err) {
-      dispatch({ type: 'LOGIN_IDLE' });
-      throw err instanceof Error ? err : new Error('Login failed');
+      await authStore.login(name, password);
+    } finally {
+      setAuthenticating(false);
     }
   }, []);
 
   const signup = useCallback(async (name: string, password: string) => {
-    dispatch({ type: 'LOGIN_START' });
+    setAuthenticating(true);
     try {
-      const user = await apiSignup(name, password);
-      dispatch({ type: 'LOGIN_SUCCESS', user });
-    } catch (err) {
-      dispatch({ type: 'LOGIN_IDLE' });
-      throw err instanceof Error ? err : new Error('Sign up failed');
+      await authStore.signup(name, password);
+    } finally {
+      setAuthenticating(false);
     }
   }, []);
 
@@ -452,12 +374,12 @@ export function useArena() {
   // own updated balance — never assumed.
   const topUp = useCallback(async (amount: number) => {
     const user = await topUpWallet(amount, newRequestId());
-    dispatch({ type: 'WALLET_REFRESHED', user });
+    authStore.updateUser(user);
   }, []);
 
   const withdraw = useCallback(async (amount: number) => {
     const user = await withdrawWallet(amount, newRequestId());
-    dispatch({ type: 'WALLET_REFRESHED', user });
+    authStore.updateUser(user);
   }, []);
 
   /**
@@ -491,7 +413,7 @@ export function useArena() {
     }
     await emitAck('rooms:leave', { roomId: room.id });
     const refreshed = await fetchWallet().catch(() => null);
-    if (refreshed) dispatch({ type: 'WALLET_REFRESHED', user: refreshed });
+    if (refreshed) authStore.updateUser(refreshed);
     dispatch({ type: 'LEAVE_ROOM' });
   }, []);
 
@@ -551,22 +473,40 @@ export function useArena() {
     dispatch({ type: 'VIEW_PROFILE' });
   }, []);
 
-  /** Signs the player out: tells the server to invalidate the session (so the cookie is
-   *  useless even if it somehow leaked), tears down the live socket connection, and resets
-   *  all client state back to the login screen. */
+  /** Signs the player out: tells the server to invalidate the session (so the cookie/token
+   *  is useless even if it somehow leaked), tears down the live socket connection, and
+   *  resets all client state back to the login screen. The game-state reset itself happens
+   *  automatically via the `auth.status` effect above once authStore flips to
+   *  'unauthenticated' — this just has to trigger that transition. */
   const logout = useCallback(async () => {
-    disconnectArenaSocket();
-    await apiLogout().catch(() => {
-      // Even if the network call fails, still forget the session client-side.
-    });
-    dispatch({ type: 'LOGOUT' });
+    await authStore.logout();
   }, []);
 
-  const clearError = useCallback(() => dispatch({ type: 'ERROR', error: null }), []);
+  const clearError = useCallback(() => {
+    dispatch({ type: 'ERROR', error: null });
+    authStore.clearExpiryReason();
+  }, []);
   const dismissNotice = useCallback(() => dispatch({ type: 'DISMISS_NOTICE' }), []);
 
+  // Backwards-compatible combined view for ArenaApp.tsx and everything downstream of it —
+  // none of those components needed to change for this rewrite. `stage: 'login'` is now
+  // ALWAYS derived from auth.status (never independently stored), so there is exactly one
+  // place in the entire app that can ever decide "show the login screen".
+  const combinedState = {
+    ...state,
+    stage: auth.status === 'authenticated' ? state.stage : ('login' as const),
+    user: auth.user,
+    authenticating,
+    bootstrapping: auth.status === 'checking',
+    bootstrapError: auth.status === 'error' ? auth.bootstrapError : null,
+    // A confirmed session-expiry message takes priority over an ordinary game-error toast
+    // (they're never both meaningful at the same time in practice — an expiry always also
+    // resets the game slice back to its error-free initial state in the same tick).
+    error: auth.expiryReason ?? state.error,
+  };
+
   return {
-    state,
+    state: combinedState,
     login,
     signup,
     refreshRooms,
