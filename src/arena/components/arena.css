@@ -11,6 +11,31 @@
   overflow-y: auto;
 }
 
+.arena-connection-error {
+  margin: auto;
+  max-width: 360px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 24px;
+  border-radius: var(--radius-md);
+  background: rgba(255, 92, 120, 0.1);
+  border: 1px solid var(--accent-danger);
+  color: var(--text-primary);
+}
+
+.arena-connection-error button {
+  align-self: center;
+  padding: 10px 24px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--accent-primary, currentColor);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
 .arena-toast {
   position: fixed;
   top: 16px;

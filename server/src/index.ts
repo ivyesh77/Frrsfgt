@@ -41,19 +41,67 @@ const ADMIN_PORT = Number(process.env.ADMIN_PORT) || 8788;
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 const SESSION_COOKIE = 'arena_session';
 
+// Trust the configured number of reverse-proxy hops (e.g. a TLS-terminating load balancer
+// or CDN in front of this process) so Express's own `req.secure`/`req.protocol` correctly
+// reflect the ORIGINAL client request's scheme (from X-Forwarded-Proto), not the scheme of
+// the final internal hop that actually reaches this process (which is very often plain HTTP
+// once TLS has already been terminated upstream). Configurable per deployment — set to the
+// exact number of trusted proxies in front of this process (0 if none, i.e. this process is
+// itself directly internet-facing). Defaults to 1 (a single trusted edge proxy/tunnel),
+// which is correct both for this sandbox's preview tunnel and for a typical single-LB
+// production deployment; raise it if there is a chain of more than one trusted proxy.
+const TRUSTED_PROXY_HOPS = Number(process.env.TRUSTED_PROXY_HOPS ?? 1);
+
 const app = express();
-// `credentials: true` + reflecting the request origin (rather than a literal "*") is what
-// makes the httpOnly session cookie usable at all — browsers refuse to send credentialed
-// requests to a wildcard-CORS origin. The actual cross-site forgery defense is the
-// cookie's own `sameSite: 'lax'` attribute set below (see setSessionCookie), not this CORS
-// policy — see AUDIT_REPORT.md / SECURITY_REPORT.md for the full reasoning.
-app.use(cors({ origin: true, credentials: true }));
+app.set('trust proxy', TRUSTED_PROXY_HOPS);
+
+// `credentials: true` is what makes the httpOnly session cookie usable at all — browsers
+// refuse to send credentialed requests to a wildcard-CORS origin. The actual cross-site
+// forgery defense is the cookie's own `sameSite` attribute (see setSessionCookie below),
+// not this CORS policy — see AUDIT_REPORT.md / SECURITY_REPORT.md for the full reasoning.
+//
+// Production: an explicit allowlist (ALLOWED_ORIGINS, comma-separated) — never a blind
+// reflect-any-origin policy once credentials are involved. Non-production (this sandbox's
+// preview, local dev): the preview is served from a different, unpredictable subdomain
+// every time a new sandbox spins up, so there is no fixed origin to allowlist ahead of
+// time — origin is reflected there instead, exactly as before, scoped to non-production.
+const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+app.use(
+  cors({
+    origin: IS_PRODUCTION ? allowedOrigins : true,
+    credentials: true,
+  }),
+);
+// Baseline security headers on every response. This API never serves HTML, so these are
+// defense-in-depth (they also protect anyone who navigates to an endpoint directly), and
+// HSTS is only ever sent when the request actually arrived over HTTPS (checked via
+// trust-proxy-aware req.secure) — telling a plain-HTTP client to force-upgrade to a TLS
+// endpoint that may not exist yet would break local/dev access rather than secure it.
+app.use((req: Request, res: Response, next: NextFunction) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
+  if (IS_PRODUCTION || req.secure) {
+    res.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
+  }
+  next();
+});
+
 app.use(express.json());
 app.use(cookieParser());
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
-  cors: { origin: true, credentials: true },
+  // Same allowlist-in-production policy as the REST CORS config above — a credentialed
+  // socket handshake (it carries the same session cookie) must never reflect an arbitrary
+  // origin once this is actually deployed; only non-production (unpredictable preview
+  // subdomains) reflects the requesting origin.
+  cors: { origin: IS_PRODUCTION ? allowedOrigins : true, credentials: true },
 });
 
 const roomManager = new RoomManager(io);
@@ -64,24 +112,35 @@ const roomManager = new RoomManager(io);
 // from anything in the request body/params/query. Every sensitive route below reads
 // `req.userId`, never `req.body.userId` or `req.params.userId`.
 // ---------------------------------------------------------------------------
-function setSessionCookie(res: Response, token: string): void {
+function setSessionCookie(res: Response, token: string, req: Request): void {
+  // `secure` must reflect whether THIS request was actually HTTPS, not a hardcoded
+  // assumption — browsers silently refuse to store a `Secure` cookie at all when the
+  // response arrived over plain HTTP, which would otherwise make local development over
+  // plain `http://localhost` (no tunnel in front of it) look like login succeeded (the
+  // response body still carries the token, so the app still works via the bearer-token
+  // fallback) while silently never actually persisting the cookie. `req.secure` is correct
+  // here specifically because `trust proxy` is configured above, so it already accounts for
+  // `X-Forwarded-Proto` from a trusted edge proxy/tunnel — not just this process's own
+  // (often plain-HTTP, post-TLS-termination) socket.
+  const isHttps = IS_PRODUCTION || req.secure;
   res.cookie(SESSION_COOKIE, token, {
     httpOnly: true, // never readable by JS — closes the "identity stored as plain JS-readable localStorage" gap
-    // CSRF defense: in a real production deployment (NODE_ENV=production) this stays
-    // 'lax' exactly as documented in SECURITY_FIX_REPORT.md §F.4 — the cookie is then
-    // never attached to a cross-site request at all, which is the actual protection.
-    // This sandbox's live-preview tunnel, however, serves the app inside a cross-site
-    // iframe on a different top-level origin (Arena's own UI embeds the preview URL) —
-    // under that origin, a 'lax' cookie is NEVER sent on any fetch/XHR/WebSocket made
-    // from inside the iframe (only true top-level navigations qualify for 'lax'), which
-    // silently broke every authenticated action right after login/signup. 'none' is the
-    // only SameSite value browsers will actually deliver in that embedded context, and it
-    // is only usable at all paired with `secure: true` — which is safe here because the
-    // preview is always served over the tunnel's own HTTPS, never plain HTTP. This
-    // relaxation is scoped to non-production only; a real standalone deployment (its own
-    // domain, not iframe-embedded) keeps the strict 'lax'/CSRF-safe behavior unchanged.
-    sameSite: IS_PRODUCTION ? 'lax' : 'none',
-    secure: true, // 'none' requires this, and the preview tunnel is always HTTPS anyway
+    // CSRF defense: with a real same-site production deployment this stays 'lax' exactly as
+    // documented in SECURITY_FIX_REPORT.md §F.4 — the cookie is then never attached to a
+    // cross-site request at all, which is the actual protection. This sandbox's live-preview
+    // tunnel, however, serves the app inside a cross-site iframe on a different top-level
+    // origin (Arena's own UI embeds the preview URL) — under that origin, a 'lax' cookie is
+    // NEVER sent on any fetch/XHR/WebSocket made from inside the iframe (only true
+    // top-level navigations qualify for 'lax'), which silently broke every authenticated
+    // action right after login/signup. 'none' is the only SameSite value browsers will
+    // actually deliver in that embedded context, and it is only usable at all paired with
+    // `secure: true`. This relaxation is scoped to non-production AND only when the request
+    // genuinely was HTTPS; a real standalone deployment (its own domain, not
+    // iframe-embedded) keeps the strict 'lax'/CSRF-safe behavior, and a plain local-HTTP dev
+    // request (no tunnel at all) correctly falls back to 'lax'/non-secure so the cookie is
+    // actually stored rather than silently dropped.
+    sameSite: IS_PRODUCTION ? 'lax' : isHttps ? 'none' : 'lax',
+    secure: isHttps,
     maxAge: SESSION_TTL_MS,
     path: '/',
   });
@@ -164,13 +223,14 @@ app.post('/api/auth/signup', signupLimiter, async (req, res) => {
   try {
     const user = await registerUser(name, password);
     const { token } = createSession(user.id);
-    setSessionCookie(res, token);
+    setSessionCookie(res, token, req);
     appendLoginAttempt({ id: nanoid(10), actor: 'player', usernameAttempted: name, success: true, timestamp: Date.now(), ip: req.ip ?? 'unknown' });
     // `token` is also returned in the body as a fallback transport for exactly the
     // scenario described on requireAuth() above (cross-site-iframe cookie blocking). The
-    // client only holds this in memory for the lifetime of the tab (see src/arena/api.ts)
-    // — never localStorage — so it carries the same "gone on a hard refresh unless the
-    // cookie also happens to work" trade-off as any other in-memory credential.
+    // client mirrors this into sessionStorage, NOT localStorage (see src/arena/api.ts for
+    // the full reasoning) — scoped to this one tab, cleared when it closes, and only ever
+    // this same opaque server-issued token, so it survives a page refresh without ever
+    // becoming a persistent or client-asserted identity.
     res.json({ user: toPublicUser(user), token });
   } catch (err) {
     if (err instanceof UsernameTakenError) return res.status(409).json({ error: err.message });
@@ -187,7 +247,7 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
   try {
     const user = await authenticateUser(name, password);
     const { token } = createSession(user.id);
-    setSessionCookie(res, token);
+    setSessionCookie(res, token, req);
     appendLoginAttempt({ id: nanoid(10), actor: 'player', usernameAttempted: name, success: true, timestamp: Date.now(), ip: req.ip ?? 'unknown' });
     res.json({ user: toPublicUser(user), token });
   } catch (err) {

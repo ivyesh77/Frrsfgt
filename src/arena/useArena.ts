@@ -49,6 +49,16 @@ interface ArenaState {
   error: string | null;
   notice: string | null;
   busy: boolean;
+  /** Set only when the initial "are we already logged in?" check (GET /api/auth/me) could
+   *  not get a definitive answer after retrying — a network error, or a 403/429/500/502/503
+   *  from the server itself. This is deliberately NOT the same as "not authenticated": a
+   *  confirmed 401 clears this and shows the ordinary login screen, but an inconclusive
+   *  check must never silently render as "please log in" (that would be indistinguishable
+   *  from a real logout to the player, even though their session may still be perfectly
+   *  valid) and must never render as "logged in" either (that would be an unverified, fake
+   *  logged-in state). Instead the UI shows an explicit "can't reach the server" screen
+   *  with a manual retry action. */
+  bootstrapError: string | null;
   /** Bumped every time a fresh `match:found` event arrives, purely so the matchmaking
    *  screen can key a one-shot entrance animation off of it instead of re-playing on every
    *  incidental room:update. */
@@ -60,6 +70,8 @@ interface ArenaState {
 
 type Action =
   | { type: 'BOOTSTRAP_DONE'; user: ArenaUser | null }
+  | { type: 'BOOTSTRAP_ERROR'; error: string }
+  | { type: 'BOOTSTRAP_RETRY' }
   | { type: 'LOGIN_START' }
   | { type: 'LOGIN_SUCCESS'; user: ArenaUser }
   | { type: 'LOGIN_ERROR'; error: string }
@@ -100,12 +112,19 @@ const initialState: ArenaState = {
   busy: false,
   matchFoundToken: 0,
   activityToken: 0,
+  bootstrapError: null,
 };
 
 function reducer(state: ArenaState, action: Action): ArenaState {
   switch (action.type) {
     case 'BOOTSTRAP_DONE':
-      return action.user ? { ...state, user: action.user, stage: 'lobby', bootstrapping: false } : { ...state, bootstrapping: false };
+      return action.user
+        ? { ...state, user: action.user, stage: 'lobby', bootstrapping: false, bootstrapError: null }
+        : { ...state, bootstrapping: false, bootstrapError: null };
+    case 'BOOTSTRAP_ERROR':
+      return { ...state, bootstrapping: false, bootstrapError: action.error };
+    case 'BOOTSTRAP_RETRY':
+      return { ...state, bootstrapping: true, bootstrapError: null };
     case 'LOGIN_START':
       return { ...state, authenticating: true, error: null };
     case 'LOGIN_SUCCESS':
@@ -263,19 +282,50 @@ export function useArena() {
   // logged in. There is no client-side identity cache anymore — a stored user id/name in
   // localStorage was itself part of the audited trust-model problem, so the browser now
   // holds no opinion about who is logged in beyond what the server's session says. ------
-  useEffect(() => {
-    let cancelled = false;
-    void fetchMe()
-      .then((user) => {
-        if (!cancelled) dispatch({ type: 'BOOTSTRAP_DONE', user });
-      })
-      .catch(() => {
-        if (!cancelled) dispatch({ type: 'BOOTSTRAP_DONE', user: null });
-      });
-    return () => {
-      cancelled = true;
+  const bootstrapRunIdRef = useRef(0);
+  const runBootstrap = useCallback(() => {
+    const runId = ++bootstrapRunIdRef.current;
+    const attemptsBeforeGivingUp = 3;
+    const backoffMs = [500, 1500, 3000];
+
+    const attempt = (n: number) => {
+      // If a newer bootstrap run (e.g. the user clicked "retry") has started since this one
+      // was scheduled, let that one win — never let a stale retry chain overwrite it.
+      if (bootstrapRunIdRef.current !== runId) return;
+      fetchMe()
+        .then((user) => {
+          // A clean result (either a real user, or an explicit "no" from a confirmed 401)
+          // is always definitive — never retried, never treated as an error.
+          if (bootstrapRunIdRef.current === runId) dispatch({ type: 'BOOTSTRAP_DONE', user });
+        })
+        .catch((err) => {
+          if (bootstrapRunIdRef.current !== runId) return;
+          // Anything that THROWS here is, by construction (see fetchMe()), not a 401 — it's
+          // a network error, or a 403/429/500/502/503 from the server. None of those mean
+          // "log the user out" or "show the login form" — they mean "we don't know yet".
+          // Retry a bounded number of times with backoff (never forever) before surfacing
+          // an explicit connection-problem state instead of silently guessing either way.
+          if (n < attemptsBeforeGivingUp - 1) {
+            window.setTimeout(() => attempt(n + 1), backoffMs[n] ?? 3000);
+            return;
+          }
+          const message = err instanceof Error ? err.message : 'Could not reach the server';
+          dispatch({ type: 'BOOTSTRAP_ERROR', error: message });
+        });
     };
+    attempt(0);
   }, []);
+
+  useEffect(() => {
+    runBootstrap();
+    // Mount-only: this is the one-time "are we already logged in?" check on page load.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const retryBootstrap = useCallback(() => {
+    dispatch({ type: 'BOOTSTRAP_RETRY' });
+    runBootstrap();
+  }, [runBootstrap]);
 
   // --- Socket event wiring — only ever connects once we actually have an authenticated
   // session; the server would reject an unauthenticated socket anyway (see socket.ts).
@@ -533,5 +583,6 @@ export function useArena() {
     logout,
     clearError,
     dismissNotice,
+    retryBootstrap,
   };
 }

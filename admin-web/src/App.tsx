@@ -157,9 +157,19 @@ function RequirePermission({ permission, children }: { permission?: string; chil
 }
 
 export function App() {
-  const { admin, loading } = useAuth();
+  const { admin, loading, bootstrapError, retryBootstrap } = useAuth();
 
   if (loading) return <div className="admin-loading" style={{ padding: 40 }}>Loading…</div>;
+  if (bootstrapError) {
+    return (
+      <div className="admin-loading" style={{ padding: 40, textAlign: 'center' }} role="alert">
+        <p>Couldn't reach the server to check your session. This is a connection problem, not a logout.</p>
+        <button type="button" onClick={retryBootstrap}>
+          Retry
+        </button>
+      </div>
+    );
+  }
   if (!admin) return <LoginPage />;
 
   return (

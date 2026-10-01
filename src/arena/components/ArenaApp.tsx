@@ -112,6 +112,24 @@ export function ArenaApp() {
     return <div className="arena-shell arena-shell--loading" aria-busy="true" />;
   }
 
+  // The initial "are we already logged in?" check couldn't get a definitive answer after
+  // retrying (network error, or the server returning 403/429/500/502/503) — this is
+  // deliberately NOT the login screen (we never confirmed the session is actually gone)
+  // and NOT the authenticated app (we never confirmed it's actually valid either). Showing
+  // either would be a guess; this tells the player plainly what's wrong instead.
+  if (state.bootstrapError) {
+    return (
+      <div className="arena-shell arena-shell--loading" aria-busy="false">
+        <div className="arena-connection-error" role="alert">
+          <p>Couldn't reach the server to check your session. This is a connection problem, not a logout.</p>
+          <button type="button" onClick={arena.retryBootstrap}>
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   const toast = state.error ? (
     <div className="arena-toast" role="alert">
       <span>{state.error}</span>

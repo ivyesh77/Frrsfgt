@@ -27,14 +27,32 @@ import type {
 // cookie attribute can opt back into working. An explicit bearer token the client attaches
 // itself isn't a cookie at all, so it isn't subject to that policy either way.
 //
-// This token is kept ONLY in this module-level JS variable — never localStorage, never
-// sessionStorage, never anywhere disk-persisted or readable outside this tab's running JS.
-// That is a deliberate trade-off: a hard page refresh loses it (falling back to whatever
-// the cookie alone can still do), which is an acceptable cost for a token that otherwise
-// behaves exactly like the cookie — an opaque, server-issued, unguessable session id, never
-// a client-asserted userId of any kind.
+// This token is mirrored into `sessionStorage` (NEVER `localStorage`) purely so a page
+// refresh in the SAME tab doesn't look like a logout when the cookie path isn't available
+// (see above) — this is the one concrete thing that previously made "log in, then refresh"
+// behave inconsistently depending on exactly how the cookie handshake went. Mirroring to
+// `sessionStorage` does not weaken authentication or create a fake logged-in state: it is
+// still exactly the same opaque, unguessable, server-issued session token the cookie would
+// otherwise carry (never a client-asserted userId/username/role of any kind), and it is
+// re-validated against the server's own session store via GET /api/auth/me on every app
+// bootstrap — a tampered or stale value here authenticates as nobody, it never grants
+// access on its own. `sessionStorage` (unlike `localStorage`) is cleared automatically the
+// moment the tab/browser closes, which bounds how long a copy of the token can ever live
+// on disk. All reads/writes are wrapped in try/catch: some browsers throw when storage is
+// unavailable (private-browsing mode, disabled storage) — this must never crash the app,
+// it just falls back to the in-memory-only behavior for that session.
 // ---------------------------------------------------------------------------
-let bearerToken: string | null = null;
+const BEARER_STORAGE_KEY = 'arena_session_token';
+
+function readStoredBearerToken(): string | null {
+  try {
+    return sessionStorage.getItem(BEARER_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+let bearerToken: string | null = readStoredBearerToken();
 
 export function getBearerToken(): string | null {
   return bearerToken;
@@ -42,6 +60,13 @@ export function getBearerToken(): string | null {
 
 function setBearerToken(token: string | null): void {
   bearerToken = token;
+  try {
+    if (token) sessionStorage.setItem(BEARER_STORAGE_KEY, token);
+    else sessionStorage.removeItem(BEARER_STORAGE_KEY);
+  } catch {
+    // Storage unavailable (private browsing, disabled) — the in-memory token above still
+    // works for the rest of this page's lifetime; it just won't survive a refresh.
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -6,9 +6,32 @@
  * independent copy/implementation, not a shared import, per the "separate application"
  * requirement.
  */
-let bearerToken: string | null = null;
+// Mirrored into sessionStorage (never localStorage) for the identical reason documented in
+// the player app's src/arena/api.ts: an in-memory-only token looks like a logout the moment
+// an admin refreshes the page, even though their server-side session is still perfectly
+// valid. Same properties as the player app's copy: scoped to this tab only, cleared when it
+// closes, never a client-asserted identity (always re-validated via GET /admin/auth/me),
+// and all storage access is try/catch guarded so private-browsing/disabled-storage just
+// falls back to in-memory-only behavior instead of crashing the admin console.
+const ADMIN_BEARER_STORAGE_KEY = 'arena_admin_session_token';
+
+function readStoredAdminBearerToken(): string | null {
+  try {
+    return sessionStorage.getItem(ADMIN_BEARER_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+let bearerToken: string | null = readStoredAdminBearerToken();
 export function setBearerToken(token: string | null) {
   bearerToken = token;
+  try {
+    if (token) sessionStorage.setItem(ADMIN_BEARER_STORAGE_KEY, token);
+    else sessionStorage.removeItem(ADMIN_BEARER_STORAGE_KEY);
+  } catch {
+    // Storage unavailable — in-memory token still works for this page's lifetime.
+  }
 }
 export function getBearerToken() {
   return bearerToken;

@@ -87,6 +87,11 @@ export function createAdminApp(deps: AdminServerDeps) {
   const app = express();
   const isProduction = process.env.NODE_ENV === 'production';
 
+  // Same reasoning as server/src/index.ts — trust the configured number of reverse-proxy
+  // hops so `req.secure` reflects the ORIGINAL client request's scheme (X-Forwarded-Proto),
+  // not the scheme of the final internal hop reaching this process.
+  app.set('trust proxy', Number(process.env.TRUSTED_PROXY_HOPS ?? 1));
+
   // Strict origin allowlist rather than the player API's "reflect any origin" policy — the
   // admin panel is operated by staff, not the general public, so there is no reason to ever
   // accept a credentialed cross-origin admin request from an arbitrary site. Configure via
@@ -98,6 +103,21 @@ export function createAdminApp(deps: AdminServerDeps) {
       credentials: true,
     }),
   );
+  // Same defense-in-depth security headers as the player API (see src/index.ts) — the
+  // admin center never serves HTML either, so this protects direct navigation and provides
+  // standard baseline hardening expected of an internal operations console.
+  app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
+    if (isProduction || req.secure) {
+      res.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
+    }
+    next();
+  });
+
   app.use(express.json({ limit: '1mb' }));
   app.use(cookieParser());
   app.use((req, _res, next) => {
@@ -123,11 +143,15 @@ export function createAdminApp(deps: AdminServerDeps) {
   const writeLimiter = rateLimit({ windowMs: 60_000, limit: 60, standardHeaders: true, legacyHeaders: false, handler: jsonRateLimitHandler });
   const readLimiter = rateLimit({ windowMs: 60_000, limit: 240, standardHeaders: true, legacyHeaders: false, handler: jsonRateLimitHandler });
 
-  function setAdminCookie(res: Response, token: string) {
+  function setAdminCookie(res: Response, token: string, req: Request) {
+    // See server/src/index.ts setSessionCookie for the identical, honestly-documented
+    // reasoning — `secure`/`sameSite` must reflect whether THIS request was actually HTTPS
+    // (via `req.secure`, which `trust proxy` above makes correct), not a hardcoded assumption.
+    const isHttps = isProduction || req.secure;
     res.cookie(ADMIN_SESSION_COOKIE, token, {
       httpOnly: true,
-      sameSite: isProduction ? 'lax' : 'none', // see server/src/index.ts setSessionCookie for the identical, honestly-documented reasoning
-      secure: true,
+      sameSite: isProduction ? 'lax' : isHttps ? 'none' : 'lax',
+      secure: isHttps,
       maxAge: 12 * 60 * 60 * 1000,
       path: '/',
     });
@@ -143,7 +167,7 @@ export function createAdminApp(deps: AdminServerDeps) {
     try {
       const admin = await authenticateAdmin(name, password, req.ip ?? 'unknown');
       const { token } = createAdminSession(admin.id);
-      setAdminCookie(res, token);
+      setAdminCookie(res, token, req);
       res.json({ admin: toPublicAdmin(admin), token, permissions: PERMISSIONS.filter((p) => roleHasPermission(admin.role, p)) });
     } catch (err) {
       if (err instanceof AdminInvalidCredentialsError) return res.status(401).json({ error: err.message });
@@ -186,7 +210,7 @@ export function createAdminApp(deps: AdminServerDeps) {
       const currentToken = bearer ?? cookieToken;
       destroyAllSessionsForAdmin(admin.id); // rotate out every existing session, including this request's...
       const { token } = createAdminSession(admin.id); // ...then issue one fresh session so this browser stays logged in.
-      setAdminCookie(res, token);
+      setAdminCookie(res, token, req);
       writeAudit({ admin: updated, action: 'CHANGE_OWN_PASSWORD', targetKind: 'admin', targetId: admin.id, reason: 'Self-service password change', result: 'success', requestId: rid });
       void currentToken; // the old token for this request was already invalidated above; nothing else to do with it
       res.json({ ok: true, admin: toPublicAdmin(updated), token });

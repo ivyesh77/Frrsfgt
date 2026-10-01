@@ -20,6 +20,9 @@ export default defineConfig({
       '/admin': {
         target: `http://localhost:${ADMIN_API_PORT}`,
         changeOrigin: true,
+        // See ../vite.config.ts for why this matters — lets the admin API correctly detect
+        // whether the original browser request was actually HTTPS.
+        xfwd: true,
       },
     },
   },
