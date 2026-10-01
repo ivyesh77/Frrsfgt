@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { useArena } from '../useArena';
 import { useOnline } from '../useOnline';
 import { useGlobalReducedMotionClass } from '../useGlobalReducedMotionClass';
+import { useArenaPrefs } from '../useArenaPrefs';
+import { startMusic, stopMusic } from '../sound';
 import { fetchUnreadNotificationCount } from '../api';
 import { AppShell, type ShellTab } from './AppShell';
 import { Home } from './Home';
@@ -40,6 +42,19 @@ export function ArenaApp() {
   const { state } = arena;
   const online = useOnline();
   useGlobalReducedMotionClass();
+  const [prefs] = useArenaPrefs();
+
+  // Ambient background music (see sound.ts startMusic/stopMusic) plays only while browsing
+  // the app with the toggle on, and is always stopped during a live match so it can never
+  // mask the real correct/wrong/countdown audio cues.
+  useEffect(() => {
+    if (prefs.musicEnabled && state.stage !== 'room') {
+      startMusic();
+    } else {
+      stopMusic();
+    }
+    return () => stopMusic();
+  }, [prefs.musicEnabled, state.stage]);
 
   const [screen, setScreen] = useState<Screen>('home');
   const [historyRoomId, setHistoryRoomId] = useState<string | null>(null);

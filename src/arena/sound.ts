@@ -55,6 +55,72 @@ function playTones(tones: Tone[]): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Background music — a small procedurally-generated ambient pad (a handful of soft,
+// slowly-detuned sine oscillators through a low-pass filter), not a bundled audio file.
+// This is deliberately minimal: it exists so the Settings "Background music" toggle is a
+// genuinely functional control rather than a dead switch, not a full soundtrack. It only
+// ever plays while browsing the app (see ArenaApp.tsx), never during live gameplay where
+// it could mask the UI's own correct/wrong/countdown cues.
+// ---------------------------------------------------------------------------
+let musicNodes: { oscillators: OscillatorNode[]; masterGain: GainNode } | null = null;
+
+const MUSIC_NOTE_FREQS = [196, 246.94, 293.66, 392]; // G3, B3, D4, G4 — a calm, consonant pad
+
+export function startMusic(): void {
+  if (musicNodes) return; // already playing
+  const audioCtx = getContext();
+  if (!audioCtx) return;
+  try {
+    const masterGain = audioCtx.createGain();
+    masterGain.gain.setValueAtTime(0, audioCtx.currentTime);
+    masterGain.gain.linearRampToValueAtTime(0.045, audioCtx.currentTime + 2);
+    const filter = audioCtx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 900;
+    masterGain.connect(filter);
+    filter.connect(audioCtx.destination);
+
+    const oscillators = MUSIC_NOTE_FREQS.map((freq, i) => {
+      const osc = audioCtx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      osc.detune.value = (i % 2 === 0 ? 1 : -1) * 4; // gentle chorus-like detune
+      const voiceGain = audioCtx.createGain();
+      voiceGain.gain.value = 1 / MUSIC_NOTE_FREQS.length;
+      // Slow independent tremolo per voice so the pad breathes instead of droning flatly.
+      const lfo = audioCtx.createOscillator();
+      lfo.frequency.value = 0.07 + i * 0.015;
+      const lfoGain = audioCtx.createGain();
+      lfoGain.gain.value = 0.35 / MUSIC_NOTE_FREQS.length;
+      lfo.connect(lfoGain);
+      lfoGain.connect(voiceGain.gain);
+      lfo.start();
+      osc.connect(voiceGain);
+      voiceGain.connect(masterGain);
+      osc.start();
+      return osc;
+    });
+
+    musicNodes = { oscillators, masterGain };
+  } catch {
+    musicNodes = null;
+  }
+}
+
+export function stopMusic(): void {
+  if (!musicNodes || !ctx) return;
+  try {
+    const { oscillators, masterGain } = musicNodes;
+    const now = ctx.currentTime;
+    masterGain.gain.linearRampToValueAtTime(0, now + 0.6);
+    oscillators.forEach((osc) => osc.stop(now + 0.7));
+  } catch {
+    // Already stopped/torn down — nothing to clean up.
+  }
+  musicNodes = null;
+}
+
 export const sounds = {
   /** Soft tap — nav clicks, option taps, generic UI button presses. */
   click: () => playTones([{ freq: 520, startOffset: 0, duration: 0.05, gain: 0.07 }]),
