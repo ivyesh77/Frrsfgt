@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react';
-import { fetchGameModes, fetchMe, fetchRooms, fetchWallet, login as apiLogin, logout as apiLogout, signup as apiSignup, topUpWallet, withdrawWallet } from './api';
+import { fetchGameModes, fetchMe, fetchRooms, fetchWallet, login as apiLogin, logout as apiLogout, setUnauthorizedHandler, signup as apiSignup, topUpWallet, withdrawWallet } from './api';
 import { disconnectArenaSocket, getArenaSocket } from './socket';
 import { sounds } from './sound';
 import { haptics } from './haptics';
@@ -224,6 +224,20 @@ export function useArena() {
     roomRef.current = state.room;
     roundRef.current = state.round;
   }, [state.user, state.room, state.round]);
+
+  // --- Any REST call that needed an authenticated session but got a 401 back (session
+  // expired/revoked server-side, e.g. a restart) now bounces here instead of leaving a raw
+  // "Not authenticated" error stranded on whichever screen asked first (Stats, Achievements,
+  // Wallet, ...). Guarded on userRef so this can never misfire for the ordinary, expected 401
+  // a bad-password login/signup attempt returns before any session exists yet. -------------
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      if (!userRef.current) return; // never logged in this tab yet — not a real expiry
+      disconnectArenaSocket();
+      dispatch({ type: 'SESSION_EXPIRED' });
+    });
+    return () => setUnauthorizedHandler(null);
+  }, []);
 
   // --- Bootstrap: ask the server (via the httpOnly session cookie) whether we're already
   // logged in. There is no client-side identity cache anymore — a stored user id/name in

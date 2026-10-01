@@ -44,9 +44,30 @@ function setBearerToken(token: string | null): void {
   bearerToken = token;
 }
 
+// ---------------------------------------------------------------------------
+// Session-expiry notification. A 401 from most endpoints (stats, achievements, wallet,
+// notifications, match history, rooms, support, ...) means a session that WAS valid has
+// stopped being valid — e.g. the server process restarted, or the token/cookie was
+// revoked. Without this hook, that 401 used to just become a dead-end "Not authenticated"
+// string stuck on whichever screen happened to ask first (e.g. Profile → Stats), while the
+// rest of the app still looked logged in. useArena.ts registers a handler here that bounces
+// the whole app back to the login screen with the same "session expired" message already
+// used for a stale socket connection — but only when a user WAS actually logged in, so this
+// never misfires for the normal, expected 401 a fresh signup/login attempt (bad password,
+// no session yet) legitimately returns.
+// ---------------------------------------------------------------------------
+let onUnauthorized: (() => void) | null = null;
+
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  onUnauthorized = handler;
+}
+
 async function parseOrThrow<T>(res: Response): Promise<T> {
   const body = (await res.json().catch(() => ({}))) as T & { error?: string };
-  if (!res.ok) throw new Error(body.error ?? `Request failed (${res.status})`);
+  if (!res.ok) {
+    if (res.status === 401) onUnauthorized?.();
+    throw new Error(body.error ?? `Request failed (${res.status})`);
+  }
   return body;
 }
 
