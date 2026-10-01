@@ -11,6 +11,7 @@ import { GAME_KIND_LABELS } from './gameKinds/index.js';
 import { checkRateLimit } from './rateLimit.js';
 import { RoomAuthorizationError, RoomManager, InsufficientFundsError } from './rooms.js';
 import { getUser } from './store.js';
+import { SessionStoreUnavailableError } from './sessionStore.js';
 import { ENTRY_FEE_TIERS, GAME_KINDS, ROOM_FORMATS, type GameKind, type RoomFormat } from './types.js';
 import {
   AccountSuspendedError,
@@ -39,6 +40,11 @@ import { listNotifications, markAllAsRead, markNotificationAsRead, unreadNotific
 const PORT = Number(process.env.PORT) || 8787;
 const ADMIN_PORT = Number(process.env.ADMIN_PORT) || 8788;
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+// The Arena preview may be embedded where browsers block third-party cookies. Keep the
+// server-validated bearer fallback enabled by default for that environment; a deployment
+// that is guaranteed to be same-site can set AUTH_BEARER_FALLBACK=0 to keep credentials
+// cookie-only.
+const BEARER_FALLBACK_ENABLED = process.env.AUTH_BEARER_FALLBACK !== '0';
 const SESSION_COOKIE = 'arena_session';
 
 // Trust the configured number of reverse-proxy hops (e.g. a TLS-terminating load balancer
@@ -55,23 +61,19 @@ const TRUSTED_PROXY_HOPS = Number(process.env.TRUSTED_PROXY_HOPS ?? 1);
 const app = express();
 app.set('trust proxy', TRUSTED_PROXY_HOPS);
 
-// `credentials: true` is what makes the httpOnly session cookie usable at all — browsers
-// refuse to send credentialed requests to a wildcard-CORS origin. The actual cross-site
-// forgery defense is the cookie's own `sameSite` attribute (see setSessionCookie below),
-// not this CORS policy — see AUDIT_REPORT.md / SECURITY_REPORT.md for the full reasoning.
-//
-// Production: an explicit allowlist (ALLOWED_ORIGINS, comma-separated) — never a blind
-// reflect-any-origin policy once credentials are involved. Non-production (this sandbox's
-// preview, local dev): the preview is served from a different, unpredictable subdomain
-// every time a new sandbox spins up, so there is no fixed origin to allowlist ahead of
-// time — origin is reflected there instead, exactly as before, scoped to non-production.
+// `credentials: true` is what makes the httpOnly session cookie usable for a genuinely
+// cross-origin frontend. The normal player deployment is same-origin through Vite's proxy,
+// so it needs no CORS header at all. If a separate frontend origin is deployed, it MUST be
+// listed explicitly in ALLOWED_ORIGINS (comma-separated); an empty list means same-origin
+// only. Never reflect an arbitrary Origin while credentials are enabled.
 const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? '')
   .split(',')
   .map((o) => o.trim())
   .filter(Boolean);
+const corsOrigin = allowedOrigins.length > 0 ? allowedOrigins : false;
 app.use(
   cors({
-    origin: IS_PRODUCTION ? allowedOrigins : true,
+    origin: corsOrigin,
     credentials: true,
   }),
 );
@@ -97,11 +99,9 @@ app.use(cookieParser());
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
-  // Same allowlist-in-production policy as the REST CORS config above — a credentialed
-  // socket handshake (it carries the same session cookie) must never reflect an arbitrary
-  // origin once this is actually deployed; only non-production (unpredictable preview
-  // subdomains) reflects the requesting origin.
-  cors: { origin: IS_PRODUCTION ? allowedOrigins : true, credentials: true },
+  // Same explicit allowlist as REST. Same-origin Vite proxy traffic does not need a CORS
+  // response, while a separately hosted frontend must be configured deliberately.
+  cors: { origin: corsOrigin, credentials: true },
 });
 
 const roomManager = new RoomManager(io);
@@ -177,24 +177,39 @@ function logAuthEvent(info: AuthDebugInfo): void {
   );
 }
 
-function requireAuth(req: Request, res: Response, next: NextFunction): void {
-  // Prefer an explicit `Authorization: Bearer <token>` header when present, falling back
-  // to the cookie. Both carry exactly the same kind of opaque, server-issued, unguessable
-  // session token from createSession() — neither is a client-asserted identity of any
-  // kind. The bearer-header path exists because this sandbox's live-preview tunnel embeds
-  // the app in a cross-site iframe on a different top-level origin, and some browsers
-  // (Safari ITP, Firefox ETP, and an increasing share of Chrome) block ALL cookies set
-  // from inside a cross-site iframe outright — regardless of SameSite/Secure attributes —
-  // as a blanket third-party-cookie policy, not just a SameSite rule. A cookie can never
-  // work around that; an explicit header the client attaches itself can, because it isn't
-  // subject to any cookie policy at all. A real, non-iframed production deployment keeps
-  // working exactly as before purely on the cookie — the header is additive, never a
-  // replacement for the cookie-based flow documented in SECURITY_FIX_REPORT.md.
+function requestBearerToken(req: Request): string | undefined {
   const authHeader = req.headers.authorization;
-  const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice('Bearer '.length) : undefined;
+  if (authHeader?.startsWith('Bearer ')) return authHeader.slice('Bearer '.length);
+  const fallbackHeader = req.headers['x-arena-session-token'];
+  return typeof fallbackHeader === 'string' ? fallbackHeader : undefined;
+}
+
+function invalidateRequestSessions(req: Request): void {
+  const bearerToken = requestBearerToken(req);
   const cookieToken = req.cookies?.[SESSION_COOKIE] as string | undefined;
-  const presentedToken = bearerToken ?? cookieToken;
-  const userId = resolveSession(presentedToken);
+  // Login/signup rotate the browser's current session. This matters when a stale valid
+  // cookie remains in an embedded preview while the auth response issues a new bearer
+  // token: leaving both live would make the next /me request look like two different users.
+  destroySession(bearerToken);
+  if (cookieToken !== bearerToken) destroySession(cookieToken);
+}
+
+function requireAuth(req: Request, res: Response, next: NextFunction): void {
+  // The httpOnly cookie is the primary browser credential. The explicit bearer token is an
+  // additive fallback because this sandbox's live-preview tunnel can embed the app in a
+  // cross-site iframe where some browsers block third-party cookies regardless of
+  // SameSite/Secure. Both transports carry the same opaque, server-issued token; neither is
+  // a client-asserted identity. If both are present, they must resolve to the same user.
+  const bearerToken = requestBearerToken(req);
+  const cookieToken = req.cookies?.[SESSION_COOKIE] as string | undefined;
+  const bearerUserId = resolveSession(bearerToken);
+  const cookieUserId = bearerToken && cookieToken === bearerToken ? bearerUserId : resolveSession(cookieToken);
+  const credentialsMismatch = Boolean(bearerUserId && cookieUserId && bearerUserId !== cookieUserId);
+  // The cookie is the primary browser credential; bearer is only a fallback for preview
+  // environments that block third-party cookies. If both are present they must resolve to
+  // the same account — never let a stale bearer token silently override a valid cookie, and
+  // never accept two concurrent browser identities as one request.
+  const userId = credentialsMismatch ? null : cookieUserId ?? bearerUserId;
   const reqId = `r${++authDebugCounter}`;
   if (!userId) {
     logAuthEvent({
@@ -204,7 +219,7 @@ function requireAuth(req: Request, res: Response, next: NextFunction): void {
       hadCookie: Boolean(cookieToken),
       origin: req.headers.origin,
       result: 'unauthenticated',
-      reason: !presentedToken ? 'no-credential-presented' : 'token-not-found-or-expired',
+      reason: credentialsMismatch ? 'credential-mismatch' : !bearerToken && !cookieToken ? 'no-credential-presented' : 'token-not-found-or-expired',
     });
     res.status(401).json({ error: 'Not authenticated' });
     return;
@@ -272,19 +287,20 @@ app.post('/api/auth/signup', signupLimiter, async (req, res) => {
 
   try {
     const user = await registerUser(name, password);
+    invalidateRequestSessions(req);
     const { token } = createSession(user.id);
     setSessionCookie(res, token, req);
     appendLoginAttempt({ id: nanoid(10), actor: 'player', usernameAttempted: name, success: true, timestamp: Date.now(), ip: req.ip ?? 'unknown' });
     logAuthEvent({ reqId: `r${++authDebugCounter}`, endpoint: 'POST /api/auth/signup', hadBearer: false, hadCookie: false, origin: req.headers.origin, result: 'success' });
-    // `token` is also returned in the body as a fallback transport for exactly the
-    // scenario described on requireAuth() above (cross-site-iframe cookie blocking). The
-    // client mirrors this into sessionStorage, NOT localStorage (see src/arena/api.ts for
-    // the full reasoning) — scoped to this one tab, cleared when it closes, and only ever
-    // this same opaque server-issued token, so it survives a page refresh without ever
-    // becoming a persistent or client-asserted identity.
-    res.json({ user: toPublicUser(user), token });
+    // The preview is embedded in a cross-site iframe, so cookie blocking is possible even
+    // when the API itself is configured for production-like HTTPS. Return the same opaque,
+    // server-issued token as an explicit fallback transport in every environment; the
+    // client stores it only in sessionStorage and every use is still checked by /me.
+    // It is never a userId/username/role assertion or a permanent identity cache.
+    res.json(BEARER_FALLBACK_ENABLED ? { user: toPublicUser(user), token } : { user: toPublicUser(user) });
   } catch (err) {
     if (err instanceof UsernameTakenError) return res.status(409).json({ error: err.message });
+    if (err instanceof SessionStoreUnavailableError) return res.status(503).json({ error: 'Authentication service unavailable' });
     res.status(400).json({ error: err instanceof Error ? err.message : 'Sign up failed' });
   }
 });
@@ -297,11 +313,12 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
 
   try {
     const user = await authenticateUser(name, password);
+    invalidateRequestSessions(req);
     const { token } = createSession(user.id);
     setSessionCookie(res, token, req);
     appendLoginAttempt({ id: nanoid(10), actor: 'player', usernameAttempted: name, success: true, timestamp: Date.now(), ip: req.ip ?? 'unknown' });
     logAuthEvent({ reqId: `r${++authDebugCounter}`, endpoint: 'POST /api/auth/login', hadBearer: false, hadCookie: false, origin: req.headers.origin, result: 'success' });
-    res.json({ user: toPublicUser(user), token });
+    res.json(BEARER_FALLBACK_ENABLED ? { user: toPublicUser(user), token } : { user: toPublicUser(user) });
   } catch (err) {
     appendLoginAttempt({ id: nanoid(10), actor: 'player', usernameAttempted: name, success: false, timestamp: Date.now(), ip: req.ip ?? 'unknown' });
     logAuthEvent({
@@ -315,15 +332,17 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
     });
     if (err instanceof InvalidCredentialsError) return res.status(401).json({ error: err.message });
     if (err instanceof AccountSuspendedError) return res.status(403).json({ error: err.message });
+    if (err instanceof SessionStoreUnavailableError) return res.status(503).json({ error: 'Authentication service unavailable' });
     res.status(400).json({ error: err instanceof Error ? err.message : 'Log in failed' });
   }
 });
 
 app.post('/api/auth/logout', (req, res) => {
-  const authHeader = req.headers.authorization;
-  const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice('Bearer '.length) : undefined;
+  const bearerToken = requestBearerToken(req);
   const cookieToken = req.cookies?.[SESSION_COOKIE] as string | undefined;
-  destroySession(bearerToken ?? cookieToken);
+  // In a browser both transports may be present. Invalidate both exact server-side session
+  // records so a stale cookie or bearer copy cannot revive the account after logout.
+  invalidateRequestSessions(req);
   res.clearCookie(SESSION_COOKIE, { path: '/' });
   logAuthEvent({
     reqId: `r${++authDebugCounter}`,
@@ -495,11 +514,10 @@ app.post('/api/support/tickets', requireAuth, walletWriteLimiter, (req, res) => 
 // there is no id field left for it to substitute.
 // ---------------------------------------------------------------------------
 io.use((socket, next) => {
-  // Same dual transport as requireAuth() above: prefer the explicit auth token the client
-  // sent in the Socket.IO handshake's own `auth` payload (socket.io's standard mechanism
-  // for exactly this — see socket.ts on the client) and fall back to the session cookie.
-  // Both resolve through the identical resolveSession() — there is still no client-
-  // supplied userId anywhere in this handshake, only an opaque, server-issued token.
+  // Same dual transport as requireAuth() above: the session cookie is primary and the
+  // Socket.IO auth token is a fallback for cookie-blocked previews. Both resolve through
+  // the identical server-side session lookup, and when both exist they must match. There
+  // is still no client-supplied userId anywhere in this handshake.
   const authToken = typeof socket.handshake.auth?.token === 'string' ? socket.handshake.auth.token : undefined;
   const cookieHeader = socket.handshake.headers.cookie;
   const cookieToken = cookieHeader
@@ -507,8 +525,11 @@ io.use((socket, next) => {
     .map((p) => p.trim())
     .find((p) => p.startsWith(`${SESSION_COOKIE}=`))
     ?.slice(SESSION_COOKIE.length + 1);
-  const presentedToken = authToken ?? (cookieToken ? decodeURIComponent(cookieToken) : undefined);
-  const userId = resolveSession(presentedToken);
+  const decodedCookieToken = cookieToken ? decodeURIComponent(cookieToken) : undefined;
+  const bearerUserId = resolveSession(authToken);
+  const cookieUserId = authToken && decodedCookieToken === authToken ? bearerUserId : resolveSession(decodedCookieToken);
+  const credentialsMismatch = Boolean(bearerUserId && cookieUserId && bearerUserId !== cookieUserId);
+  const userId = credentialsMismatch ? null : cookieUserId ?? bearerUserId;
   const reqId = `s${++authDebugCounter}`;
   if (!userId) {
     logAuthEvent({
@@ -518,7 +539,7 @@ io.use((socket, next) => {
       hadCookie: Boolean(cookieToken),
       origin: socket.handshake.headers.origin,
       result: 'unauthenticated',
-      reason: !presentedToken ? 'no-credential-presented' : 'token-not-found-or-expired',
+      reason: credentialsMismatch ? 'credential-mismatch' : !authToken && !cookieToken ? 'no-credential-presented' : 'token-not-found-or-expired',
     });
     next(new Error('Unauthorized'));
     return;

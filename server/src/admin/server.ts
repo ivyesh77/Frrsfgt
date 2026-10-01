@@ -181,7 +181,8 @@ export function createAdminApp(deps: AdminServerDeps) {
     const authHeader = req.headers.authorization;
     const bearer = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
     const cookie = (req.cookies as Record<string, string> | undefined)?.[ADMIN_SESSION_COOKIE];
-    destroyAdminSession(bearer ?? cookie);
+    destroyAdminSession(bearer);
+    if (cookie !== bearer) destroyAdminSession(cookie);
     res.clearCookie(ADMIN_SESSION_COOKIE, { path: '/' });
     res.json({ ok: true });
   });

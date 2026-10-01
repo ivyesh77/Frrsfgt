@@ -46,7 +46,7 @@ const BEARER_STORAGE_KEY = 'arena_session_token';
 
 function readStoredBearerToken(): string | null {
   try {
-    return sessionStorage.getItem(BEARER_STORAGE_KEY);
+    return globalThis.sessionStorage?.getItem(BEARER_STORAGE_KEY) ?? null;
   } catch {
     return null;
   }
@@ -61,11 +61,33 @@ export function getBearerToken(): string | null {
 function setBearerToken(token: string | null): void {
   bearerToken = token;
   try {
-    if (token) sessionStorage.setItem(BEARER_STORAGE_KEY, token);
-    else sessionStorage.removeItem(BEARER_STORAGE_KEY);
+    const storage = globalThis.sessionStorage;
+    if (!storage) return;
+    if (token) storage.setItem(BEARER_STORAGE_KEY, token);
+    else storage.removeItem(BEARER_STORAGE_KEY);
   } catch {
     // Storage unavailable (private browsing, disabled) — the in-memory token above still
     // works for the rest of this page's lifetime; it just won't survive a refresh.
+  }
+}
+
+/** Clears the client-side bearer copy after a confirmed invalid session. The server remains
+ *  authoritative: this never changes auth state by itself and is only called after a
+ *  server response has proved that the credential is no longer valid (or after logout). */
+export function clearBearerToken(): void {
+  setBearerToken(null);
+}
+
+/** HTTP failures keep their status so callers can distinguish authentication (401) from
+ *  authorization (403), throttling (429), server/gateway failures, and network failures.
+ *  Only `parseOrThrow`'s explicit 401 branch below invokes the session-expiry hook. */
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
   }
 }
 
@@ -88,10 +110,14 @@ export function setUnauthorizedHandler(handler: (() => void) | null): void {
 }
 
 async function parseOrThrow<T>(res: Response): Promise<T> {
-  const body = (await res.json().catch(() => ({}))) as T & { error?: string };
+  const parsed = await res.json().catch(() => ({}));
+  const body = (parsed && typeof parsed === 'object' ? parsed : {}) as T & { error?: string };
   if (!res.ok) {
+    // A 401 is the only HTTP response that means the credential is invalid. In particular,
+    // 403/429/500/502/503 are surfaced to the screen that made the request and never
+    // converted into a logout. Network failures never reach this function at all.
     if (res.status === 401) onUnauthorized?.();
-    throw new Error(body.error ?? `Request failed (${res.status})`);
+    throw new ApiError(body.error ?? `Request failed (${res.status})`, res.status);
   }
   return body;
 }
@@ -99,10 +125,21 @@ async function parseOrThrow<T>(res: Response): Promise<T> {
 /** Every request includes credentials (the httpOnly session cookie) as the primary
  *  transport, PLUS the in-memory bearer token as a fallback (see comment above) — never a
  *  userId/username in a body, param, or query string to assert who is making the call. */
-function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
+function apiFetch(path: string, init: RequestInit = {}, includeBearer = true): Promise<Response> {
   const headers = new Headers(init.headers);
   if (init.body !== undefined && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
-  if (bearerToken) headers.set('Authorization', `Bearer ${bearerToken}`);
+  // Read storage at request time as well as from module memory. This keeps a second copy of
+  // the module (for example, after a Vite HMR boundary) from losing the token that the
+  // signup/login copy already wrote, while still keeping the token scoped to this tab.
+  const activeBearerToken = readStoredBearerToken() ?? bearerToken;
+  if (includeBearer && activeBearerToken) {
+    // Send the same server-issued credential through a second explicit header as well.
+    // Some preview/reverse-proxy layers strip or rewrite Authorization even on a same-origin
+    // proxied request; the server validates this fallback identically and never treats it
+    // as a client identity claim.
+    headers.set('Authorization', `Bearer ${activeBearerToken}`);
+    headers.set('X-Arena-Session-Token', activeBearerToken);
+  }
   return fetch(path, { ...init, headers, credentials: 'include' });
 }
 
@@ -121,14 +158,21 @@ export async function login(name: string, password: string): Promise<ArenaUser> 
 }
 
 export async function logout(): Promise<void> {
-  await apiFetch('/api/auth/logout', { method: 'POST' });
-  setBearerToken(null);
+  try {
+    const res = await apiFetch('/api/auth/logout', { method: 'POST' });
+    await parseOrThrow<{ ok: boolean }>(res);
+  } finally {
+    // A local logout must not leave a live bearer credential in sessionStorage when the
+    // network is unavailable. The server-side session is still invalidated whenever this
+    // request reaches it; the client never pretends a failed request was a server logout.
+    setBearerToken(null);
+  }
 }
 
 /** Returns `null` (rather than throwing) when there is no valid session — this is the
  *  expected, ordinary case on a fresh visit/after a session expires, not an error. */
-export async function fetchMe(): Promise<ArenaUser | null> {
-  const res = await apiFetch('/api/auth/me');
+export async function fetchMe(options: { withoutBearer?: boolean } = {}): Promise<ArenaUser | null> {
+  const res = await apiFetch('/api/auth/me', {}, !options.withoutBearer);
   if (res.status === 401) return null;
   const body = await parseOrThrow<{ user: ArenaUser }>(res);
   return body.user;
