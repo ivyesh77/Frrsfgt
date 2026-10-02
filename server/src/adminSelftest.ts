@@ -59,10 +59,11 @@ function emitAck<T>(socket: Socket, event: string, payload: unknown): Promise<T>
 }
 
 // --- Admin-side helpers ---
-async function adminLogin(name: string, password: string): Promise<{ token: string; status: number; body: any }> {
+async function adminLogin(name: string, password: string): Promise<{ token: string; cookie: string; status: number; body: any }> {
   const res = await fetch(`${ADMIN_BASE}/admin/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, password }) });
   const body = (await res.json()) as { token: string };
-  return { token: body.token, status: res.status, body };
+  const raw = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie()[0] : res.headers.get('set-cookie');
+  return { token: body.token, cookie: raw ? raw.split(';')[0]! : '', status: res.status, body };
 }
 function adminFetch(token: string | undefined, path: string, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers);
@@ -112,10 +113,36 @@ async function main() {
   const superLogin = await adminLogin(process.env.ADMIN_BOOTSTRAP_NAME!, process.env.ADMIN_BOOTSTRAP_PASSWORD!);
   assert(superLogin.status === 200 && !!superLogin.token, 'the bootstrap SUPER_ADMIN account can log in with its real password');
   const superToken = superLogin.token;
+  const cookieOnlyRead = await fetch(`${ADMIN_BASE}/admin/auth/me`, { headers: { Cookie: superLogin.cookie } });
+  assert(cookieOnlyRead.status === 200, 'an httpOnly admin cookie can still perform authenticated reads');
+  const cookieOnlyMutation = await fetch(`${ADMIN_BASE}/admin/game/config`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Cookie: superLogin.cookie }, body: JSON.stringify({ patch: { matchDurationMs: 30000 }, reason: 'CSRF boundary test' }) });
+  assert(cookieOnlyMutation.status === 403, 'a cookie-only cross-site-style admin mutation is rejected by the CSRF session-proof boundary');
+  const cookieOnlyPasswordMutation = await fetch(`${ADMIN_BASE}/admin/auth/change-password`, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: superLogin.cookie }, body: JSON.stringify({ currentPassword: 'not-used', newPassword: 'also-not-used' }) });
+  assert(cookieOnlyPasswordMutation.status === 403, 'a cookie-only admin password-change mutation is rejected by the CSRF session-proof boundary');
 
-  const me = await adminJson<{ admin: { role: string }; permissions: string[] }>(superToken, '/admin/auth/me');
+  const me = await adminJson<{ admin: { id: string; role: string }; permissions: string[] }>(superToken, '/admin/auth/me');
   assert(me.status === 200 && me.body.admin.role === 'SUPER_ADMIN', 'GET /admin/auth/me resolves the real session, not anything client-asserted');
+  const duplicateAdminPayload = { name: `duplicate_admin_${Date.now()}`, password: 'AdminAccountPassword123', role: 'READ_ONLY', reason: 'RBAC duplicate-name test' };
+  const duplicateAdminFirst = await adminJson<{ ok: boolean }>(superToken, '/admin/admin-users', { method: 'POST', body: JSON.stringify(duplicateAdminPayload) });
+  const duplicateAdminSecond = await adminJson<{ error?: string }>(superToken, '/admin/admin-users', { method: 'POST', body: JSON.stringify(duplicateAdminPayload) });
+  assert(duplicateAdminFirst.status === 200 && duplicateAdminSecond.status === 409, 'admin usernames are unique and duplicate creation is rejected');
+  const selfDeactivateSuper = await adminJson(superToken, `/admin/admin-users/${me.body.admin.id}`, { method: 'PUT', body: JSON.stringify({ active: false, reason: 'SUPER_ADMIN self-protection test' }) });
+  const selfDemoteSuper = await adminJson(superToken, `/admin/admin-users/${me.body.admin.id}`, { method: 'PUT', body: JSON.stringify({ role: 'ADMIN', reason: 'SUPER_ADMIN role self-protection test' }) });
+  assert(selfDeactivateSuper.status === 400 && selfDemoteSuper.status === 400, 'a SUPER_ADMIN cannot deactivate or demote its own account');
   assert(me.body.permissions.includes('admin.manage'), 'SUPER_ADMIN has the admin.manage permission');
+  const createdPaymentAccount = await adminJson<{ ok: boolean; adapter: { adapterId: string; status: string; environment: string } }>(superToken, '/admin/payment-adapters', {
+    method: 'POST',
+    body: JSON.stringify({ displayName: `Self-test account ${Date.now()}`, method: 'UPI', currency: 'INR', reason: 'Test add/remove payment account' }),
+  });
+  assert(createdPaymentAccount.status === 201 && createdPaymentAccount.body.ok && createdPaymentAccount.body.adapter.status === 'DISABLED' && createdPaymentAccount.body.adapter.environment === 'TEST', 'SUPER_ADMIN can add a new disabled TEST payment account without enabling live funds');
+  const createdAdapterId = createdPaymentAccount.body.adapter.adapterId;
+  const archivedPaymentAccount = await adminJson<{ ok: boolean; adapter: { status: string; depositEnabled: boolean; withdrawalEnabled: boolean } }>(superToken, `/admin/payment-adapters/${createdAdapterId}/archive`, {
+    method: 'POST',
+    body: JSON.stringify({ reason: 'Test remove payment account from new routing' }),
+  });
+  assert(archivedPaymentAccount.status === 200 && archivedPaymentAccount.body.ok && archivedPaymentAccount.body.adapter.status === 'ARCHIVED' && !archivedPaymentAccount.body.adapter.depositEnabled && !archivedPaymentAccount.body.adapter.withdrawalEnabled, 'SUPER_ADMIN can remove a payment account by archiving it while preserving its history');
+  const previewHeaderMe = await fetch(`${ADMIN_BASE}/admin/auth/me`, { headers: { 'X-Arena-Admin-Session-Token': superToken } });
+  assert(previewHeaderMe.status === 200, 'preview fallback admin session header authenticates when Authorization is rewritten');
 
   // ===========================================================================
   // 2. UNAUTHORIZED ADMIN API ACCESS
@@ -161,6 +188,9 @@ async function main() {
   );
 
   // PAYMENT_OPERATOR: can view/edit payments and wallets, but NOT game config or admin accounts
+  assert((await adminJson(paymentOpToken, '/admin/payment-adapters')).status === 200, 'PAYMENT_OPERATOR can view the payment adapter registry');
+  assert((await adminJson(paymentOpToken, '/admin/payment-config')).status === 200, 'PAYMENT_OPERATOR can view payment routing configuration');
+  assert((await adminJson(readOnlyToken, '/admin/payment-adapters/PAY-01')).status === 200, 'READ_ONLY can view a payment adapter through the server permission boundary');
   assert((await adminJson(paymentOpToken, '/admin/payments/upi')).status === 200, 'PAYMENT_OPERATOR can view UPI config');
   assert(
     (await adminJson(paymentOpToken, '/admin/game/config', { method: 'PUT', body: JSON.stringify({ patch: { matchDurationMs: 30000 }, reason: 'x' }) })).status === 403,

@@ -34,6 +34,7 @@ process.env.ARCADE_LOGIN_LIMIT = '300';
 import { io as ioClient, type Socket } from 'socket.io-client';
 import { generateRound } from './gameKinds/index.js';
 import { computeMatchPayout } from './payout.js';
+import { __resetPaymentStoreForTests } from './payments/store.js';
 import {
   GAME_KINDS,
   MIN_REACTION_MS,
@@ -75,23 +76,25 @@ function extractCookie(res: Response): string {
   return raw.split(';')[0]!;
 }
 
-async function signup(name: string, password: string): Promise<{ status: number; body: { user?: PublicUser; error?: string }; cookie?: string }> {
+async function signup(name: string, password: string): Promise<{ status: number; body: { user?: PublicUser; error?: string; token?: string }; cookie?: string }> {
   const res = await fetch(`${BASE_URL}/api/auth/signup`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, password }),
   });
-  const body = (await res.json()) as { user?: PublicUser; error?: string };
+  const body = (await res.json()) as { user?: PublicUser; error?: string; token?: string };
   return { status: res.status, body, cookie: res.status === 200 ? extractCookie(res) : undefined };
 }
 
-async function login(name: string, password: string): Promise<{ status: number; body: { user?: PublicUser; error?: string }; cookie?: string }> {
+async function login(name: string, password: string, cookie?: string): Promise<{ status: number; body: { user?: PublicUser; error?: string; token?: string }; cookie?: string }> {
+  const headers = new Headers({ 'Content-Type': 'application/json' });
+  if (cookie) headers.set('Cookie', cookie);
   const res = await fetch(`${BASE_URL}/api/auth/login`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({ name, password }),
   });
-  const body = (await res.json()) as { user?: PublicUser; error?: string };
+  const body = (await res.json()) as { user?: PublicUser; error?: string; token?: string };
   return { status: res.status, body, cookie: res.status === 200 ? extractCookie(res) : undefined };
 }
 
@@ -272,22 +275,41 @@ async function testAuth(): Promise<void> {
   assert(noSuchUser.status === 401, 'login: a nonexistent username gets the SAME 401 as a wrong password (no user-enumeration oracle)');
   assert(wrongPw.body.error === noSuchUser.body.error, 'login: wrong-password and no-such-user return an identical error message');
 
-  const goodLogin = await login(name, 'correct-horse-battery');
+  const goodLogin = await login(name, 'correct-horse-battery', first.cookie);
   assert(goodLogin.status === 200 && goodLogin.body.user?.id === first.body.user?.id, 'login: correct credentials return the same account created at signup');
+  const rotatedSessionMe = await fetch(`${BASE_URL}/api/auth/me`, {
+    headers: { Cookie: first.cookie!, Authorization: `Bearer ${goodLogin.body.token ?? ''}` },
+  });
+  assert(rotatedSessionMe.status === 200, 'login rotates away a stale cookie while the newly-issued bearer verifies /me');
+  const fallbackHeaderMe = await fetch(`${BASE_URL}/api/auth/me`, {
+    headers: { 'X-Arena-Session-Token': goodLogin.body.token ?? '' },
+  });
+  assert(fallbackHeaderMe.status === 200, 'the preview-safe session header verifies /me when Authorization is rewritten by a proxy');
   const caseInsensitiveLogin = await login(name.toLowerCase(), 'correct-horse-battery');
   assert(caseInsensitiveLogin.status === 200 && caseInsensitiveLogin.body.user?.id === first.body.user?.id, 'login: username matching is case-insensitive');
 
   const meUnauthed = await fetch(`${BASE_URL}/api/auth/me`);
   assert(meUnauthed.status === 401, 'GET /api/auth/me with no session cookie is rejected (401)');
 
-  const meAuthed = await authedFetch(first.cookie, '/api/auth/me');
+  const meAuthed = await authedFetch(caseInsensitiveLogin.cookie, '/api/auth/me');
   const meBody = (await meAuthed.json()) as { user?: PublicUser };
   assert(meAuthed.status === 200 && meBody.user?.id === first.body.user?.id, 'GET /api/auth/me with a valid session returns the correct account');
 
-  const logoutRes = await authedFetch(first.cookie, '/api/auth/logout', { method: 'POST' });
+  // A browser can briefly carry a stale bearer copy alongside a valid httpOnly cookie
+  // (another tab may have rotated the bearer). The stale header must not turn a valid
+  // cookie into a false 401; the server should use the cookie fallback.
+  const staleBearerMe = await authedFetch(caseInsensitiveLogin.cookie, '/api/auth/me', { headers: { Authorization: 'Bearer stale-token-after-refresh' } });
+  assert(staleBearerMe.status === 200, 'a stale bearer token does not shadow a valid session cookie');
+
+  // Logout invalidates every credential transport present on that request, not just one of
+  // two separate sessions for the same user.
+  const logoutHeaders = new Headers({ Authorization: `Bearer ${goodLogin.body.token ?? ''}` });
+  logoutHeaders.set('Cookie', caseInsensitiveLogin.cookie!);
+  const logoutRes = await fetch(`${BASE_URL}/api/auth/logout`, { method: 'POST', headers: logoutHeaders });
   assert(logoutRes.status === 200, 'logout succeeds');
-  const meAfterLogout = await authedFetch(first.cookie, '/api/auth/me');
-  assert(meAfterLogout.status === 401, 'the session cookie is no longer valid after logout');
+  const meAfterLogoutCookie = await authedFetch(caseInsensitiveLogin.cookie, '/api/auth/me');
+  const meAfterLogoutBearer = await fetch(`${BASE_URL}/api/auth/me`, { headers: { Authorization: `Bearer ${goodLogin.body.token ?? ''}` } });
+  assert(meAfterLogoutCookie.status === 401 && meAfterLogoutBearer.status === 401, 'logout invalidates both the cookie and bearer session records');
 
   const walletUnauthed = await fetch(`${BASE_URL}/api/wallet`);
   assert(walletUnauthed.status === 401, 'GET /api/wallet with no session is rejected (401)');
@@ -830,6 +852,9 @@ async function testPlayerProductSurfaces(): Promise<void> {
 }
 
 async function main() {
+  // Keep the full suite deterministic even when the payment self-test ran immediately before it.
+  // This suite specifically asserts the default player-facing TEST/SANDBOX method projection.
+  __resetPaymentStoreForTests();
   testGenerators();
   testPayoutMath();
   console.log('✓ payout math verified with deterministic contrived scores (win, tie/draw, void-match, and forfeit-ranking cases)');

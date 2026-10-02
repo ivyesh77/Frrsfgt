@@ -228,7 +228,7 @@ export interface RoundResultPublic {
 }
 
 // --- Wallet ledger --------------------------------------------------------
-export type TransactionType = 'topup' | 'withdrawal' | 'entry_fee' | 'refund' | 'payout' | 'platform_fee' | 'signup_bonus';
+export type TransactionType = 'topup' | 'withdrawal' | 'entry_fee' | 'refund' | 'payout' | 'platform_fee' | 'signup_bonus' | 'withdrawal_reservation' | 'withdrawal_release' | 'deposit_reversal';
 export type TransactionStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled' | 'expired' | 'reversed';
 
 export interface Transaction {
@@ -240,6 +240,9 @@ export interface Transaction {
   balanceAfter: number;
   timestamp: number;
   status: TransactionStatus;
+  currency?: string;
+  fee?: number;
+  paymentTransactionId?: string;
 }
 
 /** Lifetime profile stats derived from a user's full transaction ledger — powers the
@@ -280,6 +283,9 @@ export const TRANSACTION_LABELS: Record<TransactionType, string> = {
   payout: 'Match payout',
   platform_fee: 'Platform fee',
   signup_bonus: 'Welcome bonus',
+  withdrawal_reservation: 'Withdrawal reserved',
+  withdrawal_release: 'Withdrawal released',
+  deposit_reversal: 'Deposit reversal',
 };
 
 // ---------------------------------------------------------------------------
@@ -414,8 +420,21 @@ export const NOTIFICATION_ICONS: Record<NotificationType, string> = {
 // Payment methods (mirrors server/src/admin/payments.ts publicPaymentMethodsView) — always
 // an honest reflection of what's actually enabled server-side, never a client guess.
 // ---------------------------------------------------------------------------
+export interface PublicPaymentMethod {
+  method: 'UPI' | 'CRYPTO';
+  currency: 'INR' | 'USDT';
+  asset: string | null;
+  network: string | null;
+  depositEnabled: boolean;
+  withdrawalEnabled: boolean;
+  minAmount: number;
+  maxAmount: number;
+  environment: 'TEST' | 'SANDBOX';
+}
+
 export interface PublicPaymentMethods {
   demoWallet: { available: true; note: string };
+  methods?: PublicPaymentMethod[];
   upi: { enabled: boolean; minAmount: number; maxAmount: number } | null;
   crypto: Array<{
     asset: string;
@@ -426,6 +445,32 @@ export interface PublicPaymentMethods {
     maxAmount: number;
     confirmationsRequired: number;
   }>;
+}
+
+export type PaymentTransactionStatus = 'CREATED' | 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'EXPIRED' | 'CANCELLED' | 'REVERSED';
+export interface PlayerPaymentTransaction {
+  id: string;
+  operation: 'DEPOSIT' | 'WITHDRAWAL';
+  method: 'UPI' | 'CRYPTO';
+  currency: 'INR' | 'USDT';
+  amount: number;
+  fees: { providerFee: number; platformFee: number; networkFee: number; totalFee: number; netAmount: number };
+  status: PaymentTransactionStatus;
+  providerReference: string | null;
+  destinationMasked: string | null;
+  asset: string | null;
+  network: string | null;
+  txHash: string | null;
+  confirmations: number | null;
+  instructions: { kind: string; label: string; value: string; expiresAt: number | null; safeMetadata: Record<string, string | number | boolean> } | null;
+  createdAt: number;
+  updatedAt: number;
+  completedAt: number | null;
+  failureReason: string | null;
+  verifiedAt: number | null;
+  workflowStatus?: 'AWAITING_PAYMENT' | 'PAYMENT_SUBMITTED' | 'AWAITING_VERIFICATION' | 'UNDER_REVIEW' | 'VERIFIED' | 'REJECTED' | 'EXPIRED' | 'CANCELLED' | 'PROCESSING' | 'CONFIRMED';
+  workflowUpdatedAt?: number;
+  proof?: { amount: number; reference: string; paymentAt: number; evidenceReference?: string | null; submittedAt: number } | null;
 }
 
 // ---------------------------------------------------------------------------

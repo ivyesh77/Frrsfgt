@@ -1,0 +1,25 @@
+const TOKEN_KEY = 'arena_operator_session_token';
+let token: string | null = readToken();
+function readToken(): string | null { try { return sessionStorage.getItem(TOKEN_KEY); } catch { return null; } }
+export function setToken(value: string | null) { token = value; try { if (value) sessionStorage.setItem(TOKEN_KEY, value); else sessionStorage.removeItem(TOKEN_KEY); } catch { /* in-memory fallback */ } }
+export class ApiError extends Error { constructor(message: string, public status: number) { super(message); } }
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> { const headers = new Headers(init.headers); if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json'); const active = readToken() ?? token; if (active) { headers.set('Authorization', `Bearer ${active}`); headers.set('X-Arena-Operator-Session-Token', active); } const response = await fetch(path, { ...init, headers, credentials: 'include' }); const body = await response.json().catch(() => ({})); if (!response.ok) { if (response.status === 401) setToken(null); throw new ApiError(body?.error ?? `Request failed (${response.status})`, response.status); } return body as T; }
+export const api = { get: <T,>(path: string) => request<T>(path), post: <T,>(path: string, body?: unknown) => request<T>(path, { method: 'POST', body: body ? JSON.stringify(body) : undefined }) };
+export async function login(name: string, password: string) { const result = await api.post<{ operator: Operator; token: string }>('/operator/auth/login', { name, password }); setToken(result.token); return result.operator; }
+export async function logout() { try { await api.post('/operator/auth/logout'); } finally { setToken(null); } }
+export async function changePassword(currentPassword: string, newPassword: string) { const result = await api.post<{ ok: boolean; operator: Operator; token: string }>('/operator/auth/change-password', { currentPassword, newPassword }); setToken(result.token); return result.operator; }
+export type Operator = { id: string; name: string; assignedPaymentAccountIds: string[]; status: 'ACTIVE' | 'DISABLED'; createdAt: number; lastLoginAt: number | null };
+export type Account = { adapterId: string; displayName: string; provider: string; method: string; currency: string; status: string; healthStatus: string; depositEnabled: boolean; withdrawalEnabled: boolean; pendingCount: number; capacity: number; environment: string };
+export type Row = { id: string; playerName: string; operation: 'DEPOSIT' | 'WITHDRAWAL'; method: string; currency: string; amount: number; status: string; workflowStatus?: string; adapterId: string; providerReference: string | null; destinationMasked: string | null; proof: { amount: number; reference: string; paymentAt: number; evidenceReference?: string | null } | null; createdAt: number; updatedAt: number; failureReason: string | null };
+export type Dashboard = { operator: Operator; accounts: Account[]; deposits: Summary; withdrawals: Summary; alerts: Row[] };
+export type Summary = { total: number; volume: number; pending: number; completed: number; failed: number };
+export type Detail = { transaction: Row; notes: Array<{ note: string; createdAt: number }>; audit: Array<{ action: string; reason: string; createdAt: number; result: string }>; reconciliation: Array<{ status: string; detail: string; checkedAt: number }> };
+export async function dashboard() { return api.get<Dashboard>('/operator/dashboard'); }
+export async function accounts() { return api.get<{ accounts: Account[] }>('/operator/payment-accounts'); }
+export async function rows(kind: 'deposits' | 'withdrawals') { return api.get<{ rows: Row[]; total: number }>(`/operator/${kind}`); }
+export async function detail(id: string) { return api.get<Detail>(`/operator/transactions/${encodeURIComponent(id)}`); }
+export async function action(id: string, actionName: 'request-info' | 'verify' | 'reject' | 'process' | 'confirm', body: { reason: string; operatorReference?: string }) { return api.post<{ ok: boolean; transaction: Row }>(`/operator/transactions/${encodeURIComponent(id)}/${actionName}`, body); }
+export async function addNote(id: string, note: string) { return api.post<{ ok: boolean }>(`/operator/transactions/${encodeURIComponent(id)}/notes`, { note }); }
+export async function reconciliation() { return api.get<{ records: Array<{ id: string; transactionId: string; provider: string; status: string; detail: string; checkedAt: number; resolution: string | null; resolutionNote: string | null }> }>('/operator/reconciliation'); }
+export async function resolveReconciliation(id: string, resolution: 'ACKNOWLEDGED' | 'ESCALATED', note: string) { return api.post<{ ok: boolean; record: unknown }>(`/operator/reconciliation/${encodeURIComponent(id)}/resolve`, { resolution, note }); }
+export async function notifications() { return api.get<{ notifications: Array<{ id: string; transactionId: string; adapterId: string; title: string; createdAt: number }> }>('/operator/notifications'); }
