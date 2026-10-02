@@ -19,20 +19,24 @@ declare module 'express-serve-static-core' {
   }
 }
 
-function extractToken(req: Request): string | undefined {
+function extractTokens(req: Request): { bearer?: string; cookie?: string } {
   const authHeader = req.headers.authorization;
-  if (authHeader?.startsWith('Bearer ')) return authHeader.slice('Bearer '.length);
+  const authorizationBearer = authHeader?.startsWith('Bearer ') ? authHeader.slice('Bearer '.length) : undefined;
+  const previewBearer = req.headers['x-arena-admin-session-token'];
+  const bearer = authorizationBearer ?? (typeof previewBearer === 'string' ? previewBearer : undefined);
   const cookies = req.cookies as Record<string, string> | undefined;
-  return cookies?.[ADMIN_SESSION_COOKIE];
+  return { bearer, cookie: cookies?.[ADMIN_SESSION_COOKIE] };
 }
 
 /** Resolves the caller's admin identity from a verified server-side session — NEVER from
- *  an `adminId`/`role` field in the body, query, or params. Rejects if the account was
- *  deactivated after the session was issued (checked fresh on every request, not cached in
- *  the session itself), so deactivating an admin takes effect immediately. */
+ * an `adminId`/`role` field in the body, query, or params. The cookie is primary and the
+ * bearer is only a cookie-blocked-preview fallback; if both resolve, they must identify the
+ * same admin so a stale token can never override a valid browser cookie. */
 export function requireAdmin(req: Request, res: Response, next: NextFunction): void {
-  const token = extractToken(req);
-  const adminId = resolveAdminSession(token);
+  const { bearer, cookie } = extractTokens(req);
+  const bearerAdminId = resolveAdminSession(bearer);
+  const cookieAdminId = resolveAdminSession(cookie);
+  const adminId = bearerAdminId && cookieAdminId && bearerAdminId !== cookieAdminId ? null : cookieAdminId ?? bearerAdminId;
   if (!adminId) {
     res.status(401).json({ error: 'Not authenticated as an admin' });
     return;

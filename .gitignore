@@ -16,6 +16,9 @@ dist-ssr
 # regenerated on first run
 server/data/store.json
 server/data/admin-store.json
+server/data/payment-store.json
+server/data/operator-store.json
+server/data/sessions.log
 *.tsbuildinfo
 
 # Editor directories and files

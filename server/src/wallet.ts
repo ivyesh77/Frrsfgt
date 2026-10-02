@@ -1,6 +1,6 @@
 import { nanoid } from 'nanoid';
 import { hashPassword, normalizeUsername, verifyPassword } from './auth.js';
-import { findUserByUsernameKey, getAllTransactionsForUser, getTransactionsForUser, getUser, recordTransaction, upsertUser } from './store.js';
+import { findLedgerTransactionByPayment, findUserByUsernameKey, getAllTransactionsForUser, getTransactionsForUser, getUser, recordTransaction, updateTransaction, upsertUser } from './store.js';
 import { pushNotification } from './notifications.js';
 import {
   STARTING_WALLET_BALANCE,
@@ -105,7 +105,15 @@ export async function authenticateUser(name: string, password: string): Promise<
   return user;
 }
 
-function applyDelta(userId: string, type: TransactionType, amount: number, roomId?: string): User {
+interface LedgerMutationOptions {
+  status?: Transaction['status'];
+  currency?: string;
+  fee?: number;
+  paymentTransactionId?: string;
+  idempotencyKey?: string;
+}
+
+function applyDelta(userId: string, type: TransactionType, amount: number, roomId?: string, options: LedgerMutationOptions = {}): User {
   const user = getUser(userId);
   if (!user) throw new Error('Unknown user');
   const nextBalance = user.walletBalance + amount;
@@ -120,10 +128,78 @@ function applyDelta(userId: string, type: TransactionType, amount: number, roomI
     roomId,
     balanceAfter: updated.walletBalance,
     timestamp: Date.now(),
-    status: 'completed',
+    status: options.status ?? 'completed',
+    currency: options.currency,
+    fee: options.fee,
+    paymentTransactionId: options.paymentTransactionId,
+    idempotencyKey: options.idempotencyKey,
   };
   recordTransaction(tx);
   return updated;
+}
+
+/** Reserves available wallet funds for a pending withdrawal. The reservation is a real
+ * ledger debit and is released or finalized exactly once by the payment service. */
+export function reserveWithdrawal(userId: string, amount: number, paymentTransactionId: string, currency: string, fee: number, idempotencyKey?: string): User {
+  if (!Number.isSafeInteger(amount) || amount <= 0) throw new Error('Withdrawal amount must be a positive whole currency unit');
+  return applyDelta(userId, 'withdrawal_reservation', -amount, undefined, {
+    status: 'pending',
+    currency,
+    fee,
+    paymentTransactionId,
+    idempotencyKey,
+  });
+}
+
+/** Marks the existing reservation as completed after the provider confirms the payout. */
+export function completeWithdrawalReservation(paymentTransactionId: string): void {
+  const reservation = findTransactionByPayment(paymentTransactionId, 'withdrawal_reservation');
+  if (!reservation) throw new Error('Withdrawal reservation ledger entry not found');
+  if (reservation.status === 'completed') return;
+  if (reservation.status !== 'pending' && reservation.status !== 'processing') throw new Error('Withdrawal reservation is not completable');
+  updateTransaction(reservation.id, { status: 'completed' });
+}
+
+/** Reverses the reservation exactly once when a provider payout fails or expires. */
+export function releaseWithdrawalReservation(paymentTransactionId: string, currency: string, idempotencyKey?: string): User {
+  const reservation = findTransactionByPayment(paymentTransactionId, 'withdrawal_reservation');
+  if (!reservation) throw new Error('Withdrawal reservation ledger entry not found');
+  if (reservation.status === 'reversed') return getUser(reservation.userId)!;
+  if (reservation.status === 'completed') throw new Error('Completed withdrawal cannot be released');
+  updateTransaction(reservation.id, { status: 'reversed' });
+  return applyDelta(reservation.userId, 'withdrawal_release', Math.abs(reservation.amount), undefined, {
+    currency,
+    paymentTransactionId,
+    idempotencyKey,
+  });
+}
+
+/** A provider reversal after a payout completed is a distinct, auditable release path. */
+export function reverseCompletedWithdrawal(paymentTransactionId: string, currency: string): User {
+  const reservation = findTransactionByPayment(paymentTransactionId, 'withdrawal_reservation');
+  if (!reservation) throw new Error('Withdrawal reservation ledger entry not found');
+  if (reservation.status === 'reversed') return getUser(reservation.userId)!;
+  if (reservation.status !== 'completed') throw new Error('Only a completed withdrawal can be provider-reversed');
+  updateTransaction(reservation.id, { status: 'reversed' });
+  return applyDelta(reservation.userId, 'withdrawal_release', Math.abs(reservation.amount), undefined, { currency, paymentTransactionId });
+}
+
+/** Credits a verified provider deposit through the existing wallet ledger. */
+export function creditPaymentDeposit(userId: string, amount: number, paymentTransactionId: string, currency: string, fee: number, idempotencyKey?: string): User {
+  if (!Number.isSafeInteger(amount) || amount <= 0) throw new Error('Deposit amount must be a positive whole currency unit');
+  return applyDelta(userId, 'topup', amount, undefined, { currency, fee, paymentTransactionId, idempotencyKey });
+}
+
+/** Reverses a previously completed payment deposit through the same ledger. */
+export function reversePaymentDeposit(userId: string, amount: number, paymentTransactionId: string, currency: string): User {
+  if (!Number.isSafeInteger(amount) || amount <= 0) throw new Error('Deposit amount must be a positive whole currency unit');
+  return applyDelta(userId, 'deposit_reversal', -amount, undefined, { currency, paymentTransactionId });
+}
+
+function findTransactionByPayment(paymentTransactionId: string, type: TransactionType): Transaction {
+  const transaction = findLedgerTransactionByPayment(paymentTransactionId, type);
+  if (!transaction) throw new Error('Payment ledger entry not found');
+  return transaction;
 }
 
 // ---------------------------------------------------------------------------

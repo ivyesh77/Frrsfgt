@@ -141,12 +141,10 @@ export interface PublicUser {
   createdAt: number;
 }
 
-export type TransactionType = 'topup' | 'withdrawal' | 'entry_fee' | 'refund' | 'payout' | 'platform_fee' | 'signup_bonus' | 'admin_adjustment';
+export type TransactionType = 'topup' | 'withdrawal' | 'entry_fee' | 'refund' | 'payout' | 'platform_fee' | 'signup_bonus' | 'admin_adjustment' | 'withdrawal_reservation' | 'withdrawal_release' | 'deposit_reversal';
 
-/** Full transaction lifecycle. Every transaction recorded by this demo ledger today
- *  completes synchronously and is stored as 'completed' immediately — but the type
- *  models the complete state machine a real payment provider integration would need
- *  (a webhook-driven UPI/crypto deposit would sit in 'pending'/'processing' first). */
+/** Full transaction lifecycle. Existing gameplay/demo records complete synchronously;
+ * payment-backed records use the same ledger with pending/processing transitions. */
 export type TransactionStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled' | 'expired' | 'reversed';
 
 export interface Transaction {
@@ -158,6 +156,10 @@ export interface Transaction {
   balanceAfter: number;
   timestamp: number;
   status: TransactionStatus;
+  currency?: string;
+  fee?: number;
+  paymentTransactionId?: string;
+  idempotencyKey?: string;
 }
 
 /** Lifetime profile stats derived from a user's full transaction ledger (never capped to

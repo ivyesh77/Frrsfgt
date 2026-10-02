@@ -11,6 +11,7 @@ import { GAME_KIND_LABELS } from './gameKinds/index.js';
 import { checkRateLimit } from './rateLimit.js';
 import { RoomAuthorizationError, RoomManager, InsufficientFundsError } from './rooms.js';
 import { getUser } from './store.js';
+import { SessionStoreUnavailableError } from './sessionStore.js';
 import { ENTRY_FEE_TIERS, GAME_KINDS, ROOM_FORMATS, type GameKind, type RoomFormat } from './types.js';
 import {
   AccountSuspendedError,
@@ -25,13 +26,20 @@ import {
   withdraw,
 } from './wallet.js';
 import { startAdminServer } from './admin/server.js';
+import { startOperatorServer } from './operator/server.js';
 import { appendLoginAttempt } from './admin/store.js';
 import { getEffectiveFlags } from './admin/flags.js';
 import { isUnderMaintenance, getMaintenanceMessage } from './admin/maintenance.js';
 import { recordEvent } from './admin/signals.js';
-import { publicPaymentMethodsView } from './admin/payments.js';
+
 import { createPlayerTicket, ticketForUser, ticketsForUser } from './admin/support.js';
 import type { SupportTicketCategory } from './admin/types.js';
+import { PaymentService } from './payments/service.js';
+import { getPaymentTransaction } from './payments/store.js';
+import { processProviderWebhook } from './payments/webhooks.js';
+import { submitPaymentProof } from './payments/workflow.js';
+import { listPaymentMethodsForPlayer } from './payments/registry.js';
+import { type PaymentCurrency, type PaymentMethod } from './payments/types.js';
 import { getPlayerMatchDetail, getPlayerMatchHistory } from './playerHistory.js';
 import { computeAchievements, computePlayerStats } from './playerStats.js';
 import { listNotifications, markAllAsRead, markNotificationAsRead, unreadNotificationCount } from './notifications.js';
@@ -39,6 +47,11 @@ import { listNotifications, markAllAsRead, markNotificationAsRead, unreadNotific
 const PORT = Number(process.env.PORT) || 8787;
 const ADMIN_PORT = Number(process.env.ADMIN_PORT) || 8788;
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+// The Arena preview may be embedded where browsers block third-party cookies. Keep the
+// server-validated bearer fallback enabled by default for that environment; a deployment
+// that is guaranteed to be same-site can set AUTH_BEARER_FALLBACK=0 to keep credentials
+// cookie-only.
+const BEARER_FALLBACK_ENABLED = process.env.AUTH_BEARER_FALLBACK !== '0';
 const SESSION_COOKIE = 'arena_session';
 
 // Trust the configured number of reverse-proxy hops (e.g. a TLS-terminating load balancer
@@ -55,23 +68,19 @@ const TRUSTED_PROXY_HOPS = Number(process.env.TRUSTED_PROXY_HOPS ?? 1);
 const app = express();
 app.set('trust proxy', TRUSTED_PROXY_HOPS);
 
-// `credentials: true` is what makes the httpOnly session cookie usable at all — browsers
-// refuse to send credentialed requests to a wildcard-CORS origin. The actual cross-site
-// forgery defense is the cookie's own `sameSite` attribute (see setSessionCookie below),
-// not this CORS policy — see AUDIT_REPORT.md / SECURITY_REPORT.md for the full reasoning.
-//
-// Production: an explicit allowlist (ALLOWED_ORIGINS, comma-separated) — never a blind
-// reflect-any-origin policy once credentials are involved. Non-production (this sandbox's
-// preview, local dev): the preview is served from a different, unpredictable subdomain
-// every time a new sandbox spins up, so there is no fixed origin to allowlist ahead of
-// time — origin is reflected there instead, exactly as before, scoped to non-production.
+// `credentials: true` is what makes the httpOnly session cookie usable for a genuinely
+// cross-origin frontend. The normal player deployment is same-origin through Vite's proxy,
+// so it needs no CORS header at all. If a separate frontend origin is deployed, it MUST be
+// listed explicitly in ALLOWED_ORIGINS (comma-separated); an empty list means same-origin
+// only. Never reflect an arbitrary Origin while credentials are enabled.
 const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? '')
   .split(',')
   .map((o) => o.trim())
   .filter(Boolean);
+const corsOrigin = allowedOrigins.length > 0 ? allowedOrigins : false;
 app.use(
   cors({
-    origin: IS_PRODUCTION ? allowedOrigins : true,
+    origin: corsOrigin,
     credentials: true,
   }),
 );
@@ -92,16 +101,19 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
-app.use(express.json());
+app.use(express.json({
+  limit: '1mb',
+  verify: (req, _res, buffer) => {
+    (req as Request).rawBody = buffer.toString('utf8');
+  },
+}));
 app.use(cookieParser());
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
-  // Same allowlist-in-production policy as the REST CORS config above — a credentialed
-  // socket handshake (it carries the same session cookie) must never reflect an arbitrary
-  // origin once this is actually deployed; only non-production (unpredictable preview
-  // subdomains) reflects the requesting origin.
-  cors: { origin: IS_PRODUCTION ? allowedOrigins : true, credentials: true },
+  // Same explicit allowlist as REST. Same-origin Vite proxy traffic does not need a CORS
+  // response, while a separately hosted frontend must be configured deliberately.
+  cors: { origin: corsOrigin, credentials: true },
 });
 
 const roomManager = new RoomManager(io);
@@ -177,24 +189,39 @@ function logAuthEvent(info: AuthDebugInfo): void {
   );
 }
 
-function requireAuth(req: Request, res: Response, next: NextFunction): void {
-  // Prefer an explicit `Authorization: Bearer <token>` header when present, falling back
-  // to the cookie. Both carry exactly the same kind of opaque, server-issued, unguessable
-  // session token from createSession() — neither is a client-asserted identity of any
-  // kind. The bearer-header path exists because this sandbox's live-preview tunnel embeds
-  // the app in a cross-site iframe on a different top-level origin, and some browsers
-  // (Safari ITP, Firefox ETP, and an increasing share of Chrome) block ALL cookies set
-  // from inside a cross-site iframe outright — regardless of SameSite/Secure attributes —
-  // as a blanket third-party-cookie policy, not just a SameSite rule. A cookie can never
-  // work around that; an explicit header the client attaches itself can, because it isn't
-  // subject to any cookie policy at all. A real, non-iframed production deployment keeps
-  // working exactly as before purely on the cookie — the header is additive, never a
-  // replacement for the cookie-based flow documented in SECURITY_FIX_REPORT.md.
+function requestBearerToken(req: Request): string | undefined {
   const authHeader = req.headers.authorization;
-  const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice('Bearer '.length) : undefined;
+  if (authHeader?.startsWith('Bearer ')) return authHeader.slice('Bearer '.length);
+  const fallbackHeader = req.headers['x-arena-session-token'];
+  return typeof fallbackHeader === 'string' ? fallbackHeader : undefined;
+}
+
+function invalidateRequestSessions(req: Request): void {
+  const bearerToken = requestBearerToken(req);
   const cookieToken = req.cookies?.[SESSION_COOKIE] as string | undefined;
-  const presentedToken = bearerToken ?? cookieToken;
-  const userId = resolveSession(presentedToken);
+  // Login/signup rotate the browser's current session. This matters when a stale valid
+  // cookie remains in an embedded preview while the auth response issues a new bearer
+  // token: leaving both live would make the next /me request look like two different users.
+  destroySession(bearerToken);
+  if (cookieToken !== bearerToken) destroySession(cookieToken);
+}
+
+function requireAuth(req: Request, res: Response, next: NextFunction): void {
+  // The httpOnly cookie is the primary browser credential. The explicit bearer token is an
+  // additive fallback because this sandbox's live-preview tunnel can embed the app in a
+  // cross-site iframe where some browsers block third-party cookies regardless of
+  // SameSite/Secure. Both transports carry the same opaque, server-issued token; neither is
+  // a client-asserted identity. If both are present, they must resolve to the same user.
+  const bearerToken = requestBearerToken(req);
+  const cookieToken = req.cookies?.[SESSION_COOKIE] as string | undefined;
+  const bearerUserId = resolveSession(bearerToken);
+  const cookieUserId = bearerToken && cookieToken === bearerToken ? bearerUserId : resolveSession(cookieToken);
+  const credentialsMismatch = Boolean(bearerUserId && cookieUserId && bearerUserId !== cookieUserId);
+  // The cookie is the primary browser credential; bearer is only a fallback for preview
+  // environments that block third-party cookies. If both are present they must resolve to
+  // the same account — never let a stale bearer token silently override a valid cookie, and
+  // never accept two concurrent browser identities as one request.
+  const userId = credentialsMismatch ? null : cookieUserId ?? bearerUserId;
   const reqId = `r${++authDebugCounter}`;
   if (!userId) {
     logAuthEvent({
@@ -204,7 +231,7 @@ function requireAuth(req: Request, res: Response, next: NextFunction): void {
       hadCookie: Boolean(cookieToken),
       origin: req.headers.origin,
       result: 'unauthenticated',
-      reason: !presentedToken ? 'no-credential-presented' : 'token-not-found-or-expired',
+      reason: credentialsMismatch ? 'credential-mismatch' : !bearerToken && !cookieToken ? 'no-credential-presented' : 'token-not-found-or-expired',
     });
     res.status(401).json({ error: 'Not authenticated' });
     return;
@@ -254,10 +281,81 @@ const loginLimiter = rateLimit({
 });
 // Financial mutations get a stricter limiter than ordinary reads.
 const walletWriteLimiter = rateLimit({ windowMs: 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false, handler: jsonRateLimitHandler });
+const paymentStatusLimiter = rateLimit({ windowMs: 60 * 1000, limit: 60, standardHeaders: true, legacyHeaders: false, handler: jsonRateLimitHandler });
+const paymentWebhookLimiter = rateLimit({ windowMs: 60 * 1000, limit: 120, standardHeaders: true, legacyHeaders: false, handler: jsonRateLimitHandler });
 const walletReadLimiter = rateLimit({ windowMs: 60 * 1000, limit: 60, standardHeaders: true, legacyHeaders: false, handler: jsonRateLimitHandler });
+
+const paymentService = new PaymentService();
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, gameKinds: GAME_KINDS, entryFees: ENTRY_FEE_TIERS, formats: ROOM_FORMATS });
+});
+
+// ---------------------------------------------------------------------------
+// Payments: the player may request a payment, but only this service can route, call an
+// adapter, accept a verified provider event, and settle the existing wallet ledger.
+// ---------------------------------------------------------------------------
+app.get('/api/payments/methods', requireAuth, paymentStatusLimiter, (_req, res) => {
+  res.json({ methods: listPaymentMethodsForPlayer(), note: 'Only TEST/SANDBOX adapters are exposed in this build; no real money is accepted.' });
+});
+
+app.post('/api/payments/webhooks/:provider', paymentWebhookLimiter, async (req, res) => {
+  const rawBody = req.rawBody ?? JSON.stringify(req.body ?? {});
+  const signature = typeof req.headers['x-payment-signature'] === 'string' ? req.headers['x-payment-signature'] : undefined;
+  try {
+    const result = await processProviderWebhook(req.params.provider ?? '', rawBody, signature);
+    res.status(result.duplicate ? 200 : 202).json({ ok: true, duplicate: result.duplicate, eventId: result.eventId, message: result.message });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Webhook rejected';
+    const status = message.includes('signature') ? 401 : message.includes('not found') ? 404 : 400;
+    res.status(status).json({ error: message });
+  }
+});
+
+app.post('/api/payments/deposits', requireAuth, walletWriteLimiter, async (req, res) => {
+  const requestId = typeof req.headers['x-request-id'] === 'string' ? req.headers['x-request-id'] : nanoid(12);
+  const idempotencyKey = typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'] : req.body?.idempotencyKey;
+  try {
+    const transaction = await paymentService.createDeposit(req.userId!, { amount: Number(req.body?.amount), method: String(req.body?.method ?? '').toUpperCase() as PaymentMethod, currency: String(req.body?.currency ?? '').toUpperCase() as PaymentCurrency, idempotencyKey: typeof idempotencyKey === 'string' ? idempotencyKey : '', asset: typeof req.body?.asset === 'string' ? req.body.asset : undefined, network: typeof req.body?.network === 'string' ? req.body.network : undefined, requestId });
+    res.status(201).json({ transaction });
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : 'Deposit request failed' });
+  }
+});
+
+app.post('/api/payments/withdrawals', requireAuth, walletWriteLimiter, async (req, res) => {
+  const requestId = typeof req.headers['x-request-id'] === 'string' ? req.headers['x-request-id'] : nanoid(12);
+  const idempotencyKey = typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'] : req.body?.idempotencyKey;
+  try {
+    const transaction = await paymentService.createWithdrawal(req.userId!, { amount: Number(req.body?.amount), method: String(req.body?.method ?? '').toUpperCase() as PaymentMethod, currency: String(req.body?.currency ?? '').toUpperCase() as PaymentCurrency, idempotencyKey: typeof idempotencyKey === 'string' ? idempotencyKey : '', destination: typeof req.body?.destination === 'string' ? req.body.destination : '', asset: typeof req.body?.asset === 'string' ? req.body.asset : undefined, network: typeof req.body?.network === 'string' ? req.body.network : undefined, requestId });
+    res.status(201).json({ transaction });
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : 'Withdrawal request failed' });
+  }
+});
+
+app.post('/api/payments/deposits/:id/proof', requireAuth, walletWriteLimiter, async (req, res) => {
+  const transaction = getPaymentTransaction(req.params.id ?? '');
+  if (!transaction || transaction.userId !== req.userId || transaction.operation !== 'DEPOSIT') return res.status(404).json({ error: 'Payment transaction not found' });
+  try {
+    const updated = submitPaymentProof(transaction, { amount: Number(req.body?.amount), reference: typeof req.body?.reference === 'string' ? req.body.reference : '', paymentAt: Number(req.body?.paymentAt), evidenceReference: typeof req.body?.evidenceReference === 'string' ? req.body.evidenceReference : null });
+    res.status(202).json({ transaction: await paymentService.getPlayerTransaction(req.userId!, updated.id) });
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : 'Payment proof submission failed' });
+  }
+});
+
+app.get('/api/payments/transactions', requireAuth, paymentStatusLimiter, (req, res) => {
+  const operation = req.query.operation === 'DEPOSIT' || req.query.operation === 'WITHDRAWAL' ? req.query.operation : undefined;
+  res.json({ transactions: paymentService.listPlayerTransactions(req.userId!, operation) });
+});
+
+app.get('/api/payments/transactions/:id', requireAuth, paymentStatusLimiter, async (req, res) => {
+  try {
+    res.json({ transaction: await paymentService.getPlayerTransaction(req.userId!, req.params.id ?? '') });
+  } catch (error) {
+    res.status(404).json({ error: error instanceof Error ? error.message : 'Payment transaction not found' });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -272,19 +370,20 @@ app.post('/api/auth/signup', signupLimiter, async (req, res) => {
 
   try {
     const user = await registerUser(name, password);
+    invalidateRequestSessions(req);
     const { token } = createSession(user.id);
     setSessionCookie(res, token, req);
     appendLoginAttempt({ id: nanoid(10), actor: 'player', usernameAttempted: name, success: true, timestamp: Date.now(), ip: req.ip ?? 'unknown' });
     logAuthEvent({ reqId: `r${++authDebugCounter}`, endpoint: 'POST /api/auth/signup', hadBearer: false, hadCookie: false, origin: req.headers.origin, result: 'success' });
-    // `token` is also returned in the body as a fallback transport for exactly the
-    // scenario described on requireAuth() above (cross-site-iframe cookie blocking). The
-    // client mirrors this into sessionStorage, NOT localStorage (see src/arena/api.ts for
-    // the full reasoning) — scoped to this one tab, cleared when it closes, and only ever
-    // this same opaque server-issued token, so it survives a page refresh without ever
-    // becoming a persistent or client-asserted identity.
-    res.json({ user: toPublicUser(user), token });
+    // The preview is embedded in a cross-site iframe, so cookie blocking is possible even
+    // when the API itself is configured for production-like HTTPS. Return the same opaque,
+    // server-issued token as an explicit fallback transport in every environment; the
+    // client stores it only in sessionStorage and every use is still checked by /me.
+    // It is never a userId/username/role assertion or a permanent identity cache.
+    res.json(BEARER_FALLBACK_ENABLED ? { user: toPublicUser(user), token } : { user: toPublicUser(user) });
   } catch (err) {
     if (err instanceof UsernameTakenError) return res.status(409).json({ error: err.message });
+    if (err instanceof SessionStoreUnavailableError) return res.status(503).json({ error: 'Authentication service unavailable' });
     res.status(400).json({ error: err instanceof Error ? err.message : 'Sign up failed' });
   }
 });
@@ -297,11 +396,12 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
 
   try {
     const user = await authenticateUser(name, password);
+    invalidateRequestSessions(req);
     const { token } = createSession(user.id);
     setSessionCookie(res, token, req);
     appendLoginAttempt({ id: nanoid(10), actor: 'player', usernameAttempted: name, success: true, timestamp: Date.now(), ip: req.ip ?? 'unknown' });
     logAuthEvent({ reqId: `r${++authDebugCounter}`, endpoint: 'POST /api/auth/login', hadBearer: false, hadCookie: false, origin: req.headers.origin, result: 'success' });
-    res.json({ user: toPublicUser(user), token });
+    res.json(BEARER_FALLBACK_ENABLED ? { user: toPublicUser(user), token } : { user: toPublicUser(user) });
   } catch (err) {
     appendLoginAttempt({ id: nanoid(10), actor: 'player', usernameAttempted: name, success: false, timestamp: Date.now(), ip: req.ip ?? 'unknown' });
     logAuthEvent({
@@ -315,15 +415,17 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
     });
     if (err instanceof InvalidCredentialsError) return res.status(401).json({ error: err.message });
     if (err instanceof AccountSuspendedError) return res.status(403).json({ error: err.message });
+    if (err instanceof SessionStoreUnavailableError) return res.status(503).json({ error: 'Authentication service unavailable' });
     res.status(400).json({ error: err instanceof Error ? err.message : 'Log in failed' });
   }
 });
 
 app.post('/api/auth/logout', (req, res) => {
-  const authHeader = req.headers.authorization;
-  const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice('Bearer '.length) : undefined;
+  const bearerToken = requestBearerToken(req);
   const cookieToken = req.cookies?.[SESSION_COOKIE] as string | undefined;
-  destroySession(bearerToken ?? cookieToken);
+  // In a browser both transports may be present. Invalidate both exact server-side session
+  // records so a stale cookie or bearer copy cannot revive the account after logout.
+  invalidateRequestSessions(req);
   res.clearCookie(SESSION_COOKIE, { path: '/' });
   logAuthEvent({
     reqId: `r${++authDebugCounter}`,
@@ -459,7 +561,14 @@ app.post('/api/notifications/read-all', requireAuth, walletWriteLimiter, (req, r
 // never an admin-only field (internal notes, which admin handled it, etc).
 // ---------------------------------------------------------------------------
 app.get('/api/payment-methods', requireAuth, walletReadLimiter, (_req, res) => {
-  res.json(publicPaymentMethodsView());
+  const methods = listPaymentMethodsForPlayer();
+  const upi = methods.find((method) => method.method === 'UPI');
+  res.json({
+    demoWallet: { available: true, note: 'Instant demo-currency deposits/withdrawals — practice coins only, never real money.' },
+    methods,
+    upi: upi ? { enabled: upi.depositEnabled || upi.withdrawalEnabled, minAmount: upi.minAmount, maxAmount: upi.maxAmount } : { enabled: false, minAmount: 0, maxAmount: 0 },
+    crypto: methods.filter((method) => method.method === 'CRYPTO').map((method) => ({ asset: method.asset ?? 'unknown', network: method.network ?? 'unknown', depositEnabled: method.depositEnabled, withdrawEnabled: method.withdrawalEnabled, minAmount: method.minAmount, maxAmount: method.maxAmount, confirmationsRequired: 0 })),
+  });
 });
 
 const SUPPORT_CATEGORIES: SupportTicketCategory[] = ['account', 'wallet', 'payment', 'gameplay', 'other'];
@@ -495,11 +604,10 @@ app.post('/api/support/tickets', requireAuth, walletWriteLimiter, (req, res) => 
 // there is no id field left for it to substitute.
 // ---------------------------------------------------------------------------
 io.use((socket, next) => {
-  // Same dual transport as requireAuth() above: prefer the explicit auth token the client
-  // sent in the Socket.IO handshake's own `auth` payload (socket.io's standard mechanism
-  // for exactly this — see socket.ts on the client) and fall back to the session cookie.
-  // Both resolve through the identical resolveSession() — there is still no client-
-  // supplied userId anywhere in this handshake, only an opaque, server-issued token.
+  // Same dual transport as requireAuth() above: the session cookie is primary and the
+  // Socket.IO auth token is a fallback for cookie-blocked previews. Both resolve through
+  // the identical server-side session lookup, and when both exist they must match. There
+  // is still no client-supplied userId anywhere in this handshake.
   const authToken = typeof socket.handshake.auth?.token === 'string' ? socket.handshake.auth.token : undefined;
   const cookieHeader = socket.handshake.headers.cookie;
   const cookieToken = cookieHeader
@@ -507,8 +615,11 @@ io.use((socket, next) => {
     .map((p) => p.trim())
     .find((p) => p.startsWith(`${SESSION_COOKIE}=`))
     ?.slice(SESSION_COOKIE.length + 1);
-  const presentedToken = authToken ?? (cookieToken ? decodeURIComponent(cookieToken) : undefined);
-  const userId = resolveSession(presentedToken);
+  const decodedCookieToken = cookieToken ? decodeURIComponent(cookieToken) : undefined;
+  const bearerUserId = resolveSession(authToken);
+  const cookieUserId = authToken && decodedCookieToken === authToken ? bearerUserId : resolveSession(decodedCookieToken);
+  const credentialsMismatch = Boolean(bearerUserId && cookieUserId && bearerUserId !== cookieUserId);
+  const userId = credentialsMismatch ? null : cookieUserId ?? bearerUserId;
   const reqId = `s${++authDebugCounter}`;
   if (!userId) {
     logAuthEvent({
@@ -518,7 +629,7 @@ io.use((socket, next) => {
       hadCookie: Boolean(cookieToken),
       origin: socket.handshake.headers.origin,
       result: 'unauthenticated',
-      reason: !presentedToken ? 'no-credential-presented' : 'token-not-found-or-expired',
+      reason: credentialsMismatch ? 'credential-mismatch' : !authToken && !cookieToken ? 'no-credential-presented' : 'token-not-found-or-expired',
     });
     next(new Error('Unauthorized'));
     return;
@@ -677,5 +788,6 @@ httpServer.listen(PORT, () => {
 // doc-comment for the full reasoning. Set ADMIN_ALLOWED_ORIGIN to the admin web app's
 // actual origin before deploying this anywhere reachable by the public internet.
 const adminServer = startAdminServer({ roomManager, io }, ADMIN_PORT);
+const operatorServer = startOperatorServer({ port: Number(process.env.OPERATOR_PORT) || 8789 });
 
-export { app, httpServer, io, PORT, ADMIN_PORT, adminServer };
+export { app, httpServer, io, PORT, ADMIN_PORT, adminServer, operatorServer };
