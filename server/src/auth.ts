@@ -9,14 +9,22 @@
  */
 import { randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
+import {
+  countStoredSessionsForUser,
+  createStoredSession,
+  destroyAllStoredSessionsForUser,
+  destroyStoredSession,
+  resetStoredSessionsForTests,
+  resolveStoredSession,
+} from './sessionStore.js';
 
 const scryptAsync = promisify(scrypt);
 
 const SCRYPT_KEY_LENGTH = 64;
 const SESSION_TOKEN_BYTES = 32;
 /** Sessions are idle-expired: any authenticated request pushes the expiry forward, so an
- *  active player is never logged out mid-session, but a token that stops being used goes
- *  stale and is rejected. */
+ * active player is never logged out mid-session, but a token that stops being used goes
+ * stale and is rejected. */
 export const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 // ---------------------------------------------------------------------------
@@ -31,7 +39,7 @@ export async function hashPassword(password: string): Promise<string> {
 }
 
 /** Constant-time comparison — never short-circuits on the first differing byte, so timing
- *  cannot be used to guess a correct password byte-by-byte. */
+ * cannot be used to guess a correct password byte-by-byte. */
 export async function verifyPassword(password: string, stored: string): Promise<boolean> {
   const [salt, hashHex] = stored.split(':');
   if (!salt || !hashHex) return false;
@@ -50,77 +58,44 @@ export function normalizeUsername(raw: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Sessions. Kept in-memory (this server is already a single, in-memory-plus-JSON-file
-// process — see store.ts — so this introduces no new architectural assumption). A
-// restart invalidates all sessions, which is an acceptable, honest tradeoff for this
-// stage; a production deployment with multiple server instances would move this to a
-// shared store (Redis, DB-backed sessions) instead, unchanged from the outside.
+// Sessions. Tokens remain opaque random credentials, but their server-side records live in
+// a durable journal rather than a process-local Map. A normal refresh, a server restart,
+// and multiple processes pointed at the same SESSION_STORE_FILE use the same lookup. The
+// seven-day idle expiry remains enforced; sessions are not permanent.
 // ---------------------------------------------------------------------------
-
-interface Session {
-  userId: string;
-  expiresAt: number;
-}
-
-const sessions = new Map<string, Session>();
 
 export function createSession(userId: string): { token: string; expiresAt: number } {
   const token = randomBytes(SESSION_TOKEN_BYTES).toString('base64url');
   const expiresAt = Date.now() + SESSION_TTL_MS;
-  sessions.set(token, { userId, expiresAt });
+  createStoredSession(token, userId, expiresAt);
   return { token, expiresAt };
 }
 
 /** Returns the authenticated userId for a valid, non-expired token — and slides the
- *  expiry forward (idle-timeout semantics) — or `null` if the token is missing/expired. */
+ * expiry forward (idle-timeout semantics) — or `null` if the token is missing/expired. */
 export function resolveSession(token: string | undefined | null): string | null {
-  if (!token) return null;
-  const session = sessions.get(token);
-  if (!session) return null;
-  if (session.expiresAt < Date.now()) {
-    sessions.delete(token);
-    return null;
-  }
-  session.expiresAt = Date.now() + SESSION_TTL_MS;
-  return session.userId;
+  return resolveStoredSession(token, Date.now(), Date.now() + SESSION_TTL_MS);
 }
 
 export function destroySession(token: string | undefined | null): void {
-  if (!token) return;
-  sessions.delete(token);
+  destroyStoredSession(token);
 }
 
 /** Invalidates EVERY active session for a given account, regardless of which device/tab it
- *  was created from — used by the admin "force logout" action and automatically whenever
- *  an admin suspends/bans a user, so an already-open tab cannot keep playing/spending after
- *  the action is taken. Returns how many sessions were actually destroyed (0 is a normal,
- *  valid result for an account with no active session). */
+ * was created from — used by the admin "force logout" action and automatically whenever an
+ * admin suspends/bans a user. Returns how many sessions were actually destroyed. */
 export function destroyAllSessionsForUser(userId: string): number {
-  let count = 0;
-  for (const [token, session] of sessions) {
-    if (session.userId === userId) {
-      sessions.delete(token);
-      count += 1;
-    }
-  }
-  return count;
+  return destroyAllStoredSessionsForUser(userId);
 }
 
 /** Read-only visibility for the admin "session/device summary" panel — deliberately
- *  returns only the count and the nearest expiry, never the token itself (a session token
- *  is a live credential; even an admin should never be able to read or reconstruct one). */
+ * returns only the count and the nearest expiry, never the token itself (a session token
+ * is a live credential; even an admin should never be able to read or reconstruct one). */
 export function countActiveSessionsForUser(userId: string): { count: number; nearestExpiresAt: number | null } {
-  let count = 0;
-  let nearestExpiresAt: number | null = null;
-  for (const session of sessions.values()) {
-    if (session.userId !== userId) continue;
-    count += 1;
-    if (nearestExpiresAt === null || session.expiresAt < nearestExpiresAt) nearestExpiresAt = session.expiresAt;
-  }
-  return { count, nearestExpiresAt };
+  return countStoredSessionsForUser(userId);
 }
 
 /** Test-only escape hatch so the self-test suite starts from a clean slate. */
 export function __resetSessionsForTests(): void {
-  sessions.clear();
+  resetStoredSessionsForTests();
 }

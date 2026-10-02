@@ -48,7 +48,14 @@ export class ApiError extends Error {
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body !== undefined && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
-  if (bearerToken) headers.set('Authorization', `Bearer ${bearerToken}`);
+  const activeBearerToken = readStoredAdminBearerToken() ?? bearerToken;
+  if (activeBearerToken) {
+    headers.set('Authorization', `Bearer ${activeBearerToken}`);
+    // Some preview/reverse-proxy layers rewrite or remove Authorization. The server
+    // validates this second header as the same opaque admin session token; it is not an
+    // admin identity claim and never contains a role or user-supplied id.
+    headers.set('X-Arena-Admin-Session-Token', activeBearerToken);
+  }
   const res = await fetch(path, { ...init, headers, credentials: 'include' });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new ApiError(body?.error ?? `Request failed (${res.status})`, res.status);
