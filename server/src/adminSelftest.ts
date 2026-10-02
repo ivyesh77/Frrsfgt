@@ -116,6 +116,19 @@ async function main() {
   const me = await adminJson<{ admin: { role: string }; permissions: string[] }>(superToken, '/admin/auth/me');
   assert(me.status === 200 && me.body.admin.role === 'SUPER_ADMIN', 'GET /admin/auth/me resolves the real session, not anything client-asserted');
   assert(me.body.permissions.includes('admin.manage'), 'SUPER_ADMIN has the admin.manage permission');
+  const createdPaymentAccount = await adminJson<{ ok: boolean; adapter: { adapterId: string; status: string; environment: string } }>(superToken, '/admin/payment-adapters', {
+    method: 'POST',
+    body: JSON.stringify({ displayName: `Self-test account ${Date.now()}`, method: 'UPI', currency: 'INR', reason: 'Test add/remove payment account' }),
+  });
+  assert(createdPaymentAccount.status === 201 && createdPaymentAccount.body.ok && createdPaymentAccount.body.adapter.status === 'DISABLED' && createdPaymentAccount.body.adapter.environment === 'TEST', 'SUPER_ADMIN can add a new disabled TEST payment account without enabling live funds');
+  const createdAdapterId = createdPaymentAccount.body.adapter.adapterId;
+  const archivedPaymentAccount = await adminJson<{ ok: boolean; adapter: { status: string; depositEnabled: boolean; withdrawalEnabled: boolean } }>(superToken, `/admin/payment-adapters/${createdAdapterId}/archive`, {
+    method: 'POST',
+    body: JSON.stringify({ reason: 'Test remove payment account from new routing' }),
+  });
+  assert(archivedPaymentAccount.status === 200 && archivedPaymentAccount.body.ok && archivedPaymentAccount.body.adapter.status === 'ARCHIVED' && !archivedPaymentAccount.body.adapter.depositEnabled && !archivedPaymentAccount.body.adapter.withdrawalEnabled, 'SUPER_ADMIN can remove a payment account by archiving it while preserving its history');
+  const previewHeaderMe = await fetch(`${ADMIN_BASE}/admin/auth/me`, { headers: { 'X-Arena-Admin-Session-Token': superToken } });
+  assert(previewHeaderMe.status === 200, 'preview fallback admin session header authenticates when Authorization is rewritten');
 
   // ===========================================================================
   // 2. UNAUTHORIZED ADMIN API ACCESS
@@ -161,6 +174,9 @@ async function main() {
   );
 
   // PAYMENT_OPERATOR: can view/edit payments and wallets, but NOT game config or admin accounts
+  assert((await adminJson(paymentOpToken, '/admin/payment-adapters')).status === 200, 'PAYMENT_OPERATOR can view the payment adapter registry');
+  assert((await adminJson(paymentOpToken, '/admin/payment-config')).status === 200, 'PAYMENT_OPERATOR can view payment routing configuration');
+  assert((await adminJson(readOnlyToken, '/admin/payment-adapters/PAY-01')).status === 200, 'READ_ONLY can view a payment adapter through the server permission boundary');
   assert((await adminJson(paymentOpToken, '/admin/payments/upi')).status === 200, 'PAYMENT_OPERATOR can view UPI config');
   assert(
     (await adminJson(paymentOpToken, '/admin/game/config', { method: 'PUT', body: JSON.stringify({ patch: { matchDurationMs: 30000 }, reason: 'x' }) })).status === 403,

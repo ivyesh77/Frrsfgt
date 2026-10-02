@@ -60,7 +60,14 @@ export const PERMISSIONS = [
   'wallet.adjust', // audited balance adjustment
   'transactions.view',
   'payments.view',
-  'payments.edit', // provider/UPI/crypto config
+  'payments.edit', // legacy UI aliases retained for compatibility
+  'PAYMENT_VIEW',
+  'PAYMENT_CONFIG',
+  'PAYMENT_OPERATE',
+  'PAYMENT_RECONCILE',
+  'PAYMENT_ADJUST',
+  'PAYMENT_ADMIN',
+  'PAYMENT_OPERATOR_ADMIN',
   'webhooks.view',
   'webhooks.retry',
   'reconciliation.view',
@@ -86,7 +93,7 @@ export type Permission = (typeof PERMISSIONS)[number];
  *  anything client-supplied. */
 export const ROLE_PERMISSIONS: Record<AdminRole, readonly Permission[]> = {
   SUPER_ADMIN: PERMISSIONS, // full authorized administration
-  ADMIN: PERMISSIONS.filter((p) => p !== 'admin.manage'), // everything except managing other admins
+  ADMIN: PERMISSIONS.filter((p) => p !== 'admin.manage' && p !== 'PAYMENT_OPERATOR_ADMIN'), // operational admin, not super-admin/operator management
   GAME_OPERATOR: [
     'dashboard.view',
     'rooms.view',
@@ -108,6 +115,10 @@ export const ROLE_PERMISSIONS: Record<AdminRole, readonly Permission[]> = {
     'transactions.view',
     'payments.view',
     'payments.edit',
+    'PAYMENT_VIEW',
+    'PAYMENT_CONFIG',
+    'PAYMENT_OPERATE',
+    'PAYMENT_RECONCILE',
     'webhooks.view',
     'webhooks.retry',
     'reconciliation.view',
@@ -135,6 +146,7 @@ export const ROLE_PERMISSIONS: Record<AdminRole, readonly Permission[]> = {
     'wallet.view',
     'transactions.view',
     'payments.view',
+    'PAYMENT_VIEW',
     'webhooks.view',
     'reconciliation.view',
     'risk.view',

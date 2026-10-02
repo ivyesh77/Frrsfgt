@@ -65,6 +65,13 @@ import { getUserDetail, listUsers, suspendUser, unsuspendUser, banUser, unbanUse
 import { listAdmins, listAuditLog, upsertAdmin } from './store.js';
 import { writeAudit } from './audit.js';
 import { ADMIN_ROLES, roleHasPermission, PERMISSIONS, type AdminAccount, type AdminRole, type MaintenanceScope } from './types.js';
+import { archiveAdapter, configureAdapter, createAdapter, healthCheckAdapter, listPublicAdapters, publicAdapter } from '../payments/registry.js';
+import { getPaymentAdapter, getPaymentConfig, getPaymentTransaction, getRoutingDecision, listPaymentAdapters, listPaymentAuditEvents, listPaymentRiskSignals, listPaymentTransactions, listProviderEvents, listReconciliationRecords, updatePaymentConfig } from '../payments/store.js';
+import { reconcileAllPending, reconcileTransaction } from '../payments/reconciliation.js';
+import { listWebhookEvents } from '../payments/webhooks.js';
+import { type PaymentAdapterId, type PaymentConfig, type PaymentLimits, type PaymentOperation, type PaymentTransactionStatus } from '../payments/types.js';
+import { createOperatorAccount, toPublicOperator } from '../operator/auth.js';
+import { assignOperatorAccounts, getOperator, listOperatorAudit, listOperators, upsertOperator } from '../operator/store.js';
 
 export interface AdminServerDeps {
   roomManager: RoomManager;
@@ -78,6 +85,13 @@ function jsonRateLimitHandler(_req: Request, res: Response): void {
 function requestId(req: Request): string {
   const existing = req.headers['x-request-id'];
   return typeof existing === 'string' && existing.length > 0 ? existing : nanoid(12);
+}
+
+function requestAdminBearer(req: Request): string | undefined {
+  const authHeader = req.headers.authorization;
+  if (authHeader?.startsWith('Bearer ')) return authHeader.slice('Bearer '.length);
+  const previewToken = req.headers['x-arena-admin-session-token'];
+  return typeof previewToken === 'string' ? previewToken : undefined;
 }
 
 const SERVER_STARTED_AT = Date.now();
@@ -178,10 +192,10 @@ export function createAdminApp(deps: AdminServerDeps) {
   });
 
   app.post('/admin/auth/logout', (req, res) => {
-    const authHeader = req.headers.authorization;
-    const bearer = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+    const bearer = requestAdminBearer(req);
     const cookie = (req.cookies as Record<string, string> | undefined)?.[ADMIN_SESSION_COOKIE];
-    destroyAdminSession(bearer ?? cookie);
+    destroyAdminSession(bearer);
+    if (cookie !== bearer) destroyAdminSession(cookie);
     res.clearCookie(ADMIN_SESSION_COOKIE, { path: '/' });
     res.json({ ok: true });
   });
@@ -204,8 +218,7 @@ export function createAdminApp(deps: AdminServerDeps) {
     if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Current and new password are required' });
     try {
       const updated = await changeOwnAdminPassword(admin.id, currentPassword, newPassword);
-      const authHeader = req.headers.authorization;
-      const bearer = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+      const bearer = requestAdminBearer(req);
       const cookieToken = (req.cookies as Record<string, string> | undefined)?.[ADMIN_SESSION_COOKIE];
       const currentToken = bearer ?? cookieToken;
       destroyAllSessionsForAdmin(admin.id); // rotate out every existing session, including this request's...
@@ -490,16 +503,266 @@ export function createAdminApp(deps: AdminServerDeps) {
     res.json({ rows: sorted.slice(start, start + pageSize), total: sorted.length, page, pageSize });
   });
 
-  // --- Payments: UPI / Crypto / Webhooks / Reconciliation ------------------------------------------------------------------------
+  // --- Payment engine: adapter registry, routing, transactions and reconciliation --------
+  app.get('/admin/payment-adapters', requireAdmin, requirePermission('PAYMENT_VIEW'), (_req, res) => {
+    res.json({ adapters: listPublicAdapters(), slots: listPublicAdapters().length, note: 'Secret values are never returned. Production provider activation is blocked until official adapters and compliance configuration are installed.' });
+  });
+
+  app.post('/admin/payment-adapters', requireAdmin, requirePermission('PAYMENT_CONFIG'), writeLimiter, (req, res) => {
+    const admin = req.admin!;
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+    const displayName = typeof req.body?.displayName === 'string' ? req.body.displayName : '';
+    const method = req.body?.method === 'UPI' || req.body?.method === 'CRYPTO' ? req.body.method : null;
+    const currency = req.body?.currency === 'INR' || req.body?.currency === 'USDT' ? req.body.currency : null;
+    if (!reason) return res.status(400).json({ error: 'A reason is required to create a payment account' });
+    if (!method || !currency) return res.status(400).json({ error: 'A supported payment method and currency are required' });
+    try {
+      const adapter = createAdapter({ displayName, method, currency });
+      writeAudit({ admin, action: 'CREATE_PAYMENT_ADAPTER', targetKind: 'paymentAdapter', targetId: adapter.adapterId, reason, after: publicAdapter(adapter), result: 'success', requestId: requestId(req) });
+      res.status(201).json({ ok: true, adapter: publicAdapter(adapter) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Payment account creation failed';
+      writeAudit({ admin, action: 'CREATE_PAYMENT_ADAPTER', targetKind: 'paymentAdapter', targetId: null, reason, result: 'failure', errorMessage: message, requestId: requestId(req) });
+      res.status(400).json({ error: message });
+    }
+  });
+
+  app.get('/admin/payment-adapters/:id', requireAdmin, requirePermission('PAYMENT_VIEW'), (req, res) => {
+    const adapter = listPaymentAdapters().find((entry) => entry.adapterId === req.params.id);
+    if (!adapter) return res.status(404).json({ error: 'Payment adapter not found' });
+    res.json({ adapter: publicAdapter(adapter) });
+  });
+
+  app.get('/admin/payment-config', requireAdmin, requirePermission('PAYMENT_VIEW'), (_req, res) => {
+    res.json({ config: getPaymentConfig() });
+  });
+
+  app.put('/admin/payment-config', requireAdmin, requirePermission('PAYMENT_CONFIG'), writeLimiter, (req, res) => {
+    const admin = req.admin!;
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+    const rid = requestId(req);
+    if (!reason) return res.status(400).json({ error: 'A reason is required to change payment routing configuration' });
+    try {
+      const incoming = req.body?.patch ?? {};
+      const patch: Partial<PaymentConfig> = {};
+      const strategy = incoming.routingStrategy;
+      if (strategy !== undefined) {
+        if (!['ROUND_ROBIN', 'WEIGHTED', 'PRIORITY', 'LEAST_LOAD', 'CAPACITY_BASED'].includes(strategy)) throw new Error('Invalid routing strategy');
+        patch.routingStrategy = strategy;
+      }
+      if (incoming.allowPreCreationFailover !== undefined) {
+        if (typeof incoming.allowPreCreationFailover !== 'boolean') throw new Error('Invalid failover setting');
+        patch.allowPreCreationFailover = incoming.allowPreCreationFailover;
+      }
+      if (incoming.defaultCurrency !== undefined) {
+        if (incoming.defaultCurrency !== 'INR' && incoming.defaultCurrency !== 'USDT') throw new Error('Invalid default currency');
+        patch.defaultCurrency = incoming.defaultCurrency;
+      }
+      if (incoming.platformFeeBps !== undefined) {
+        if (!Number.isInteger(incoming.platformFeeBps) || incoming.platformFeeBps < 0 || incoming.platformFeeBps > 2_000) throw new Error('Invalid platform fee');
+        patch.platformFeeBps = incoming.platformFeeBps;
+      }
+      if (incoming.withdrawalFeeFlat !== undefined) {
+        if (!Number.isFinite(incoming.withdrawalFeeFlat) || incoming.withdrawalFeeFlat < 0) throw new Error('Invalid withdrawal fee');
+        patch.withdrawalFeeFlat = incoming.withdrawalFeeFlat;
+      }
+      for (const key of ['depositLimits', 'withdrawalLimits'] as const) {
+        if (incoming[key] === undefined) continue;
+        const limits = incoming[key] as Partial<PaymentLimits>;
+        const minAmount = Number(limits.minAmount);
+        const maxAmount = Number(limits.maxAmount);
+        const dailyLimit = Number(limits.dailyLimit);
+        const monthlyLimit = Number(limits.monthlyLimit);
+        if ([minAmount, maxAmount, dailyLimit, monthlyLimit].some((value) => !Number.isFinite(value) || value < 0) || minAmount > maxAmount || maxAmount > dailyLimit || dailyLimit > monthlyLimit) throw new Error(`Invalid ${key}`);
+        patch[key] = { minAmount, maxAmount, dailyLimit, monthlyLimit };
+      }
+      const before = getPaymentConfig();
+      const config = updatePaymentConfig(patch);
+      writeAudit({ admin, action: 'UPDATE_PAYMENT_CONFIG', targetKind: 'paymentConfig', targetId: null, reason, before, after: config, result: 'success', requestId: rid });
+      res.json({ ok: true, config });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Payment config update failed';
+      writeAudit({ admin, action: 'UPDATE_PAYMENT_CONFIG', targetKind: 'paymentConfig', targetId: null, reason, result: 'failure', errorMessage: message, requestId: rid });
+      res.status(400).json({ error: message });
+    }
+  });
+
+  app.put('/admin/payment-adapters/:id', requireAdmin, requirePermission('PAYMENT_CONFIG'), writeLimiter, (req, res) => {
+    const admin = req.admin!;
+    const adapterId = (req.params.id ?? '') as PaymentAdapterId;
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+    const rid = requestId(req);
+    if (!reason) return res.status(400).json({ error: 'A reason is required to change a payment adapter' });
+    const allowed = ['displayName', 'provider', 'method', 'currency', 'asset', 'network', 'environment', 'status', 'depositEnabled', 'withdrawalEnabled', 'minAmount', 'maxAmount', 'priority', 'routingWeight', 'capacity', 'healthFailureAutoDisable', 'secretRef'] as const;
+    const patch: Record<string, unknown> = {};
+    for (const key of allowed) if (Object.prototype.hasOwnProperty.call(req.body?.patch ?? {}, key)) patch[key] = req.body.patch[key];
+    try {
+      const before = listPaymentAdapters().find((adapter) => adapter.adapterId === adapterId);
+      if (!before) return res.status(404).json({ error: 'Payment adapter not found' });
+      const adapter = configureAdapter(adapterId, patch);
+      writeAudit({ admin, action: 'UPDATE_PAYMENT_ADAPTER', targetKind: 'paymentAdapter', targetId: adapterId, reason, before: publicAdapter(before), after: publicAdapter(adapter), result: 'success', requestId: rid });
+      res.json({ ok: true, adapter: publicAdapter(adapter) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Payment adapter update failed';
+      writeAudit({ admin, action: 'UPDATE_PAYMENT_ADAPTER', targetKind: 'paymentAdapter', targetId: adapterId, reason, result: 'failure', errorMessage: message, requestId: rid });
+      res.status(400).json({ error: message });
+    }
+  });
+
+  app.post('/admin/payment-adapters/:id/archive', requireAdmin, requirePermission('PAYMENT_CONFIG'), writeLimiter, (req, res) => {
+    const admin = req.admin!;
+    const adapterId = (req.params.id ?? '') as PaymentAdapterId;
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+    const rid = requestId(req);
+    if (!reason) return res.status(400).json({ error: 'A reason is required to archive a payment adapter' });
+    try {
+      const before = listPaymentAdapters().find((adapter) => adapter.adapterId === adapterId);
+      const adapter = archiveAdapter(adapterId);
+      writeAudit({ admin, action: 'ARCHIVE_PAYMENT_ADAPTER', targetKind: 'paymentAdapter', targetId: adapterId, reason, before: before ? publicAdapter(before) : null, after: publicAdapter(adapter), result: 'success', requestId: rid });
+      res.json({ ok: true, adapter: publicAdapter(adapter) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Payment adapter archive failed';
+      writeAudit({ admin, action: 'ARCHIVE_PAYMENT_ADAPTER', targetKind: 'paymentAdapter', targetId: adapterId, reason, result: 'failure', errorMessage: message, requestId: rid });
+      res.status(400).json({ error: message });
+    }
+  });
+
+  app.post('/admin/payment-adapters/:id/health-check', requireAdmin, requirePermission('PAYMENT_OPERATE'), writeLimiter, async (req, res) => {
+    const admin = req.admin!;
+    const adapterId = (req.params.id ?? '') as PaymentAdapterId;
+    try {
+      const result = await healthCheckAdapter(adapterId);
+      writeAudit({ admin, action: 'HEALTH_CHECK_PAYMENT_ADAPTER', targetKind: 'paymentAdapter', targetId: adapterId, reason: typeof req.body?.reason === 'string' ? req.body.reason : null, after: { status: result.status, detail: result.detail }, result: 'success', requestId: requestId(req) });
+      res.json({ ok: true, status: result.status, detail: result.detail, adapter: publicAdapter(result.config) });
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : 'Health check failed' });
+    }
+  });
+
+  app.get('/admin/payment-operators', requireAdmin, requirePermission('PAYMENT_OPERATOR_ADMIN'), (_req, res) => {
+    res.json({ operators: listOperators().map(toPublicOperator) });
+  });
+
+  app.post('/admin/payment-operators', requireAdmin, requirePermission('PAYMENT_OPERATOR_ADMIN'), writeLimiter, async (req, res) => {
+    const admin = req.admin!;
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    const accountIds = Array.isArray(req.body?.assignedPaymentAccountIds) ? req.body.assignedPaymentAccountIds.filter((value: unknown): value is PaymentAdapterId => typeof value === 'string' && !!getPaymentAdapter(value)) : [];
+    if (!reason) return res.status(400).json({ error: 'A reason is required to create a payment operator' });
+    if (accountIds.length !== (Array.isArray(req.body?.assignedPaymentAccountIds) ? req.body.assignedPaymentAccountIds.length : 0)) return res.status(400).json({ error: 'Every assigned payment account must be a valid adapter slot' });
+    try {
+      const operator = await createOperatorAccount(name, password, admin.id, accountIds);
+      writeAudit({ admin, action: 'CREATE_PAYMENT_OPERATOR', targetKind: 'paymentOperator', targetId: operator.id, reason, after: { name: operator.name, assignedPaymentAccountIds: operator.assignedPaymentAccountIds }, result: 'success', requestId: requestId(req) });
+      res.status(201).json({ ok: true, operator: toPublicOperator(operator) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Payment operator creation failed';
+      writeAudit({ admin, action: 'CREATE_PAYMENT_OPERATOR', targetKind: 'paymentOperator', targetId: null, reason, result: 'failure', errorMessage: message, requestId: requestId(req) });
+      res.status(400).json({ error: message });
+    }
+  });
+
+  app.put('/admin/payment-operators/:id', requireAdmin, requirePermission('PAYMENT_OPERATOR_ADMIN'), writeLimiter, (req, res) => {
+    const admin = req.admin!;
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+    const operator = getOperator(req.params.id ?? '');
+    if (!reason) return res.status(400).json({ error: 'A reason is required to change a payment operator' });
+    if (!operator) return res.status(404).json({ error: 'Payment operator not found' });
+    const patch: { status?: 'ACTIVE' | 'DISABLED'; assignedPaymentAccountIds?: PaymentAdapterId[] } = {};
+    if (typeof req.body?.status === 'string') {
+      if (req.body.status !== 'ACTIVE' && req.body.status !== 'DISABLED') return res.status(400).json({ error: 'Invalid operator status' });
+      patch.status = req.body.status;
+    }
+    if (Array.isArray(req.body?.assignedPaymentAccountIds)) {
+      if (req.body.assignedPaymentAccountIds.some((value: unknown) => typeof value !== 'string' || !getPaymentAdapter(value))) return res.status(400).json({ error: 'Invalid assigned payment account' });
+      patch.assignedPaymentAccountIds = req.body.assignedPaymentAccountIds;
+    }
+    const before = toPublicOperator(operator);
+    const updated = patch.assignedPaymentAccountIds ? assignOperatorAccounts(operator.id, patch.assignedPaymentAccountIds) : operator;
+    if (!updated) return res.status(404).json({ error: 'Payment operator not found' });
+    if (patch.status) { updated.status = patch.status; upsertOperator(updated); }
+    writeAudit({ admin, action: 'UPDATE_PAYMENT_OPERATOR', targetKind: 'paymentOperator', targetId: operator.id, reason, before, after: toPublicOperator(updated), result: 'success', requestId: requestId(req) });
+    res.json({ ok: true, operator: toPublicOperator(updated) });
+  });
+
+  app.get('/admin/payment-operator-audit', requireAdmin, requirePermission('PAYMENT_OPERATOR_ADMIN'), (_req, res) => {
+    res.json({ entries: listOperators().flatMap((operator) => listOperatorAudit(operator.id)).sort((a, b) => b.createdAt - a.createdAt).slice(0, 500) });
+  });
+
+  app.get('/admin/payment-overview', requireAdmin, requirePermission('PAYMENT_VIEW'), (_req, res) => {
+    const transactions = listPaymentTransactions();
+    const completed = transactions.filter((transaction) => transaction.status === 'COMPLETED');
+    const failed = transactions.filter((transaction) => transaction.status === 'FAILED');
+    const pending = transactions.filter((transaction) => transaction.status === 'PENDING' || transaction.status === 'PROCESSING' || transaction.status === 'CREATED');
+    res.json({ totalDeposits: transactions.filter((transaction) => transaction.operation === 'DEPOSIT').length, totalWithdrawals: transactions.filter((transaction) => transaction.operation === 'WITHDRAWAL').length, pendingDeposits: pending.filter((transaction) => transaction.operation === 'DEPOSIT').length, pendingWithdrawals: pending.filter((transaction) => transaction.operation === 'WITHDRAWAL').length, failedTransactions: failed.length, activeAdapters: listPaymentAdapters().filter((adapter) => adapter.status === 'ACTIVE').length, disabledAdapters: listPaymentAdapters().filter((adapter) => adapter.status !== 'ACTIVE').length, successRate: completed.length + failed.length > 0 ? completed.length / (completed.length + failed.length) : null, failureRate: completed.length + failed.length > 0 ? failed.length / (completed.length + failed.length) : null, pendingVolume: pending.reduce((sum, transaction) => sum + transaction.amount, 0), adapters: listPublicAdapters() });
+  });
+
+  app.get('/admin/payment-analytics', requireAdmin, requirePermission('PAYMENT_VIEW'), (req, res) => {
+    const from = typeof req.query.from === 'string' && Number.isFinite(Number(req.query.from)) ? Number(req.query.from) : undefined;
+    const to = typeof req.query.to === 'string' && Number.isFinite(Number(req.query.to)) ? Number(req.query.to) : undefined;
+    const adapterId = typeof req.query.adapterId === 'string' ? req.query.adapterId : undefined;
+    const transactions = listPaymentTransactions({ from, to, adapterId });
+    const summarize = (operation: PaymentOperation) => {
+      const scoped = transactions.filter((transaction) => transaction.operation === operation);
+      const completed = scoped.filter((transaction) => transaction.status === 'COMPLETED');
+      const failed = scoped.filter((transaction) => ['FAILED', 'EXPIRED', 'CANCELLED'].includes(transaction.status));
+      return { count: scoped.length, completed: completed.length, failed: failed.length, pending: scoped.length - completed.length - failed.length, completedVolume: completed.reduce((sum, transaction) => sum + transaction.amount, 0), averageProcessingMs: completed.length ? Math.round(completed.reduce((sum, transaction) => sum + ((transaction.completedAt ?? transaction.updatedAt) - transaction.createdAt), 0) / completed.length) : null };
+    };
+    const byAdapter = listPaymentAdapters().map((adapter) => { const scoped = transactions.filter((transaction) => transaction.adapterId === adapter.adapterId); return { adapterId: adapter.adapterId, provider: adapter.provider, count: scoped.length, completed: scoped.filter((transaction) => transaction.status === 'COMPLETED').length, failed: scoped.filter((transaction) => ['FAILED', 'EXPIRED', 'CANCELLED'].includes(transaction.status)).length, volume: scoped.filter((transaction) => transaction.status === 'COMPLETED').reduce((sum, transaction) => sum + transaction.amount, 0) }; }).filter((entry) => entry.count > 0);
+    res.json({ from: from ?? null, to: to ?? null, adapterId: adapterId ?? null, deposits: summarize('DEPOSIT'), withdrawals: summarize('WITHDRAWAL'), byAdapter });
+  });
+
+  app.get('/admin/payment-risk', requireAdmin, requirePermission('PAYMENT_VIEW'), (req, res) => {
+    const from = typeof req.query.from === 'string' && Number.isFinite(Number(req.query.from)) ? Number(req.query.from) : undefined;
+    const to = typeof req.query.to === 'string' && Number.isFinite(Number(req.query.to)) ? Number(req.query.to) : undefined;
+    const severity = typeof req.query.severity === 'string' ? req.query.severity : undefined;
+    const signals = listPaymentRiskSignals().filter((signal) => (!from || signal.createdAt >= from) && (!to || signal.createdAt <= to) && (!severity || signal.severity === severity)).sort((a, b) => b.createdAt - a.createdAt).slice(0, 500);
+    res.json({ signals, counts: signals.reduce<Record<string, number>>((counts, signal) => { counts[signal.severity] = (counts[signal.severity] ?? 0) + 1; return counts; }, {}) });
+  });
+
+  app.get('/admin/payment-transactions', requireAdmin, requirePermission('PAYMENT_VIEW'), (req, res) => {
+    const operation = req.query.operation === 'DEPOSIT' || req.query.operation === 'WITHDRAWAL' ? req.query.operation as PaymentOperation : undefined;
+    const status = typeof req.query.status === 'string' ? req.query.status as PaymentTransactionStatus : undefined;
+    const adapterId = typeof req.query.adapterId === 'string' ? req.query.adapterId : undefined;
+    const rows = listPaymentTransactions({ operation, status, adapterId }).sort((a, b) => b.createdAt - a.createdAt);
+    res.json({ rows, total: rows.length });
+  });
+
+  app.get('/admin/payment-transactions/:id', requireAdmin, requirePermission('PAYMENT_VIEW'), (req, res) => {
+    const transaction = getPaymentTransaction(req.params.id ?? '');
+    if (!transaction) return res.status(404).json({ error: 'Payment transaction not found' });
+    const historicalAdapter = listPaymentAdapters().find((adapter) => adapter.adapterId === transaction.adapterId);
+    res.json({ transaction, adapter: historicalAdapter ? publicAdapter(historicalAdapter) : null, routing: getRoutingDecision(transaction.id) ?? null, providerEvents: listProviderEvents().filter((event) => event.transactionId === transaction.id || event.providerReference === transaction.providerReference), reconciliation: listReconciliationRecords(transaction.id), audit: listPaymentAuditEvents().filter((event) => event.targetId === transaction.id) });
+  });
+
+  app.get('/admin/payment-webhooks', requireAdmin, requirePermission('PAYMENT_VIEW'), (_req, res) => {
+    res.json({ events: listWebhookEvents() });
+  });
+
+  app.get('/admin/payment-reconciliation', requireAdmin, requirePermission('PAYMENT_RECONCILE'), (_req, res) => {
+    res.json({ records: listReconciliationRecords().slice().reverse() });
+  });
+
+  app.post('/admin/payment-reconciliation', requireAdmin, requirePermission('PAYMENT_RECONCILE'), writeLimiter, async (req, res) => {
+    const admin = req.admin!;
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+    if (!reason) return res.status(400).json({ error: 'A reason is required to initiate reconciliation' });
+    try {
+      const records = typeof req.body?.transactionId === 'string' ? [await reconcileTransaction(req.body.transactionId)] : await reconcileAllPending();
+      writeAudit({ admin, action: 'RUN_PAYMENT_RECONCILIATION', targetKind: 'paymentTransaction', targetId: typeof req.body?.transactionId === 'string' ? req.body.transactionId : null, reason, after: { count: records.length }, result: 'success', requestId: requestId(req) });
+      res.json({ ok: true, records });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Reconciliation failed';
+      writeAudit({ admin, action: 'RUN_PAYMENT_RECONCILIATION', targetKind: 'paymentTransaction', targetId: null, reason, result: 'failure', errorMessage: message, requestId: requestId(req) });
+      res.status(400).json({ error: message });
+    }
+  });
+
+  // --- Existing UPI / Crypto / Webhooks / Reconciliation compatibility views --------
   app.get('/admin/payments/providers', requireAdmin, requirePermission('payments.view'), (_req, res) => {
-    const upi = getEffectiveUpiConfig();
-    const crypto = getEffectiveCryptoConfigs();
     res.json({
-      providers: [
-        { name: 'UPI', method: 'upi', enabled: upi.enabled, environment: upi.environment, webhookConfigured: upi.webhookConfigured, health: upi.enabled ? 'not_connected' : 'disabled', lastSuccessfulEventAt: upi.lastSuccessfulEventAt },
-        ...crypto.map((c) => ({ name: `${c.asset} (${c.network})`, method: 'crypto' as const, enabled: c.depositEnabled || c.withdrawEnabled, environment: 'sandbox' as const, webhookConfigured: false, health: 'not_connected' as const, lastSuccessfulEventAt: null })),
-      ],
-      note: 'No real payment provider is integrated in this build — every "not_connected" health status is literally true, not a placeholder. See ADMIN_REPORT.md.',
+      providers: listPublicAdapters().map((adapter) => ({ name: `${adapter.adapterId} · ${adapter.displayName}`, method: adapter.method, enabled: adapter.status === 'ACTIVE' && (adapter.depositEnabled || adapter.withdrawalEnabled), environment: adapter.environment, webhookConfigured: adapter.secretConfigured, health: adapter.healthStatus, lastSuccessfulEventAt: adapter.lastSuccessfulTransactionAt })),
+      note: 'This compatibility view reflects the server-side adapter registry. Only TEST/SANDBOX adapters are available in this build; no real provider is configured.',
     });
   });
 

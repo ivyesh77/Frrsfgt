@@ -87,6 +87,22 @@ export function recordTransaction(tx: Transaction): void {
   saveDb(db);
 }
 
+export function updateTransaction(id: string, patch: Partial<Transaction>): Transaction | undefined {
+  const transaction = db.transactions.find((entry) => entry.id === id);
+  if (!transaction) return undefined;
+  Object.assign(transaction, patch);
+  saveDb(db);
+  return transaction;
+}
+
+export function findTransaction(id: string): Transaction | undefined {
+  return db.transactions.find((entry) => entry.id === id);
+}
+
+export function findLedgerTransactionByPayment(paymentTransactionId: string, type: Transaction['type']): Transaction | undefined {
+  return db.transactions.find((entry) => entry.paymentTransactionId === paymentTransactionId && entry.type === type);
+}
+
 export function getTransactionsForUser(userId: string, limit = 25): Transaction[] {
   return db.transactions
     .filter((t) => t.userId === userId)
