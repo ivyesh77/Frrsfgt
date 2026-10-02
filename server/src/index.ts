@@ -43,15 +43,19 @@ import { type PaymentCurrency, type PaymentMethod } from './payments/types.js';
 import { getPlayerMatchDetail, getPlayerMatchHistory } from './playerHistory.js';
 import { computeAchievements, computePlayerStats } from './playerStats.js';
 import { listNotifications, markAllAsRead, markNotificationAsRead, unreadNotificationCount } from './notifications.js';
+import { runtimeConfig } from './infrastructure/runtimeConfig.js';
+import { enqueueProviderWebhook, checkDurableDependencies } from './infrastructure/jobs.js';
+import { metricsText, requestMetrics } from './infrastructure/observability.js';
+import { createDistributedRateLimitStore } from './infrastructure/redis.js';
 
 const PORT = Number(process.env.PORT) || 8787;
 const ADMIN_PORT = Number(process.env.ADMIN_PORT) || 8788;
-const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const IS_PRODUCTION = runtimeConfig.isProduction
 // The Arena preview may be embedded where browsers block third-party cookies. Keep the
 // server-validated bearer fallback enabled by default for that environment; a deployment
 // that is guaranteed to be same-site can set AUTH_BEARER_FALLBACK=0 to keep credentials
 // cookie-only.
-const BEARER_FALLBACK_ENABLED = process.env.AUTH_BEARER_FALLBACK !== '0';
+const BEARER_FALLBACK_ENABLED = runtimeConfig.bearerFallbackEnabled
 const SESSION_COOKIE = 'arena_session';
 
 // Trust the configured number of reverse-proxy hops (e.g. a TLS-terminating load balancer
@@ -73,10 +77,7 @@ app.set('trust proxy', TRUSTED_PROXY_HOPS);
 // so it needs no CORS header at all. If a separate frontend origin is deployed, it MUST be
 // listed explicitly in ALLOWED_ORIGINS (comma-separated); an empty list means same-origin
 // only. Never reflect an arbitrary Origin while credentials are enabled.
-const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? '')
-  .split(',')
-  .map((o) => o.trim())
-  .filter(Boolean);
+const allowedOrigins = runtimeConfig.allowedOrigins
 const corsOrigin = allowedOrigins.length > 0 ? allowedOrigins : false;
 app.use(
   cors({
@@ -108,6 +109,16 @@ app.use(express.json({
   },
 }));
 app.use(cookieParser());
+
+const recordPlayerRequest = requestMetrics('player');
+app.use((req, res, next) => {
+  const startedAt = Date.now();
+  res.on('finish', () => {
+    const route = req.route?.path ?? req.path;
+    recordPlayerRequest(req.method, typeof route === 'string' ? route : 'unknown', res.statusCode, Date.now() - startedAt);
+  });
+  next();
+});
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
@@ -271,6 +282,7 @@ const signupLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   handler: jsonRateLimitHandler,
+  store: runtimeConfig.isNonLocal ? createDistributedRateLimitStore('player-signup') : undefined,
 });
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -278,17 +290,117 @@ const loginLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   handler: jsonRateLimitHandler,
+  store: runtimeConfig.isNonLocal ? createDistributedRateLimitStore('player-login') : undefined,
 });
 // Financial mutations get a stricter limiter than ordinary reads.
-const walletWriteLimiter = rateLimit({ windowMs: 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false, handler: jsonRateLimitHandler });
-const paymentStatusLimiter = rateLimit({ windowMs: 60 * 1000, limit: 60, standardHeaders: true, legacyHeaders: false, handler: jsonRateLimitHandler });
-const paymentWebhookLimiter = rateLimit({ windowMs: 60 * 1000, limit: 120, standardHeaders: true, legacyHeaders: false, handler: jsonRateLimitHandler });
-const walletReadLimiter = rateLimit({ windowMs: 60 * 1000, limit: 60, standardHeaders: true, legacyHeaders: false, handler: jsonRateLimitHandler });
+const walletWriteLimiter = rateLimit({ windowMs: 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false, handler: jsonRateLimitHandler, store: runtimeConfig.isNonLocal ? createDistributedRateLimitStore('player-wallet-write') : undefined });
+const paymentStatusLimiter = rateLimit({ windowMs: 60 * 1000, limit: 60, standardHeaders: true, legacyHeaders: false, handler: jsonRateLimitHandler, store: runtimeConfig.isNonLocal ? createDistributedRateLimitStore('player-payment-status') : undefined });
+const paymentWebhookLimiter = rateLimit({ windowMs: 60 * 1000, limit: 120, standardHeaders: true, legacyHeaders: false, handler: jsonRateLimitHandler, store: runtimeConfig.isNonLocal ? createDistributedRateLimitStore('player-payment-webhook') : undefined });
+const walletReadLimiter = rateLimit({ windowMs: 60 * 1000, limit: 60, standardHeaders: true, legacyHeaders: false, handler: jsonRateLimitHandler, store: runtimeConfig.isNonLocal ? createDistributedRateLimitStore('player-wallet-read') : undefined });
+
+app.get('/health/live', (_req, res) => {
+  res.json({ ok: true, status: 'LIVE', service: 'player-api', version: runtimeConfig.buildVersion });
+});
+
+app.get('/health/ready', async (_req, res) => {
+  if (!runtimeConfig.isNonLocal) {
+    res.json({ ok: true, status: 'READY', environment: runtimeConfig.appEnvironment, dependencies: 'local-development-only' });
+    return;
+  }
+  const dependencies = await checkDurableDependencies();
+  const ok = dependencies.database.ok && dependencies.queue.ok;
+  const safeDependencies = { database: { ok: dependencies.database.ok, latencyMs: dependencies.database.latencyMs }, queue: { ok: dependencies.queue.ok, latencyMs: dependencies.queue.latencyMs } };
+  res.status(ok ? 200 : 503).json({ ok, status: ok ? 'READY' : 'NOT_READY', environment: runtimeConfig.appEnvironment, dependencies: safeDependencies });
+});
+
+app.get('/metrics', async (req, res) => {
+  if (runtimeConfig.metricsToken && req.headers.authorization !== `Bearer ${runtimeConfig.metricsToken}`) {
+    res.status(401).json({ error: 'Metrics authentication required' });
+    return;
+  }
+  res.type('text/plain').send(await metricsText());
+});
 
 const paymentService = new PaymentService();
 
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, gameKinds: GAME_KINDS, entryFees: ENTRY_FEE_TIERS, formats: ROOM_FORMATS });
+  res.json({ ok: true, status: 'LIVE', environment: runtimeConfig.appEnvironment, gameKinds: GAME_KINDS, entryFees: ENTRY_FEE_TIERS, formats: ROOM_FORMATS });
+});
+
+// ---------------------------------------------------------------------------
+// Payments: the player may request a payment, but only this service can route, call an
+// adapter, accept a verified provider event, and settle the existing wallet ledger.
+// ---------------------------------------------------------------------------
+app.get('/api/payments/methods', requireAuth, paymentStatusLimiter, (_req, res) => {
+  res.json({ methods: listPaymentMethodsForPlayer(), note: 'Only TEST/SANDBOX adapters are exposed in this build; no real money is accepted.' });
+});
+
+app.post('/api/payments/webhooks/:provider', paymentWebhookLimiter, async (req, res) => {
+  const rawBody = req.rawBody ?? JSON.stringify(req.body ?? {});
+  const signature = typeof req.headers['x-payment-signature'] === 'string' ? req.headers['x-payment-signature'] : undefined;
+  try {
+    const provider = req.params.provider ?? '';
+    if (runtimeConfig.jobBackend === 'bullmq') {
+      const queued = await enqueueProviderWebhook({ provider, rawBody, signature: signature ?? null, receivedAt: new Date().toISOString() });
+      // The worker performs provider signature/schema/correlation/idempotency checks before
+      // any transaction or ledger mutation. The deterministic job id makes webhook retries
+      // safe while the queue gives the provider a fast acknowledgement.
+      res.status(202).json({ ok: true, queued: true, jobId: queued.jobId, message: 'Webhook accepted for durable verification' });
+      return;
+    }
+    const result = await processProviderWebhook(provider, rawBody, signature);
+    res.status(result.duplicate ? 200 : 202).json({ ok: true, duplicate: result.duplicate, eventId: result.eventId, message: result.message });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Webhook rejected';
+    const status = message.includes('signature') ? 401 : message.includes('not found') ? 404 : 400;
+    res.status(status).json({ error: message });
+  }
+});
+
+app.post('/api/payments/deposits', requireAuth, walletWriteLimiter, async (req, res) => {
+  const requestId = typeof req.headers['x-request-id'] === 'string' ? req.headers['x-request-id'] : nanoid(12);
+  const idempotencyKey = typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'] : req.body?.idempotencyKey;
+  try {
+    const transaction = await paymentService.createDeposit(req.userId!, { amount: Number(req.body?.amount), method: String(req.body?.method ?? '').toUpperCase() as PaymentMethod, currency: String(req.body?.currency ?? '').toUpperCase() as PaymentCurrency, idempotencyKey: typeof idempotencyKey === 'string' ? idempotencyKey : '', asset: typeof req.body?.asset === 'string' ? req.body.asset : undefined, network: typeof req.body?.network === 'string' ? req.body.network : undefined, requestId });
+    res.status(201).json({ transaction });
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : 'Deposit request failed' });
+  }
+});
+
+app.post('/api/payments/withdrawals', requireAuth, walletWriteLimiter, async (req, res) => {
+  const requestId = typeof req.headers['x-request-id'] === 'string' ? req.headers['x-request-id'] : nanoid(12);
+  const idempotencyKey = typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'] : req.body?.idempotencyKey;
+  try {
+    const transaction = await paymentService.createWithdrawal(req.userId!, { amount: Number(req.body?.amount), method: String(req.body?.method ?? '').toUpperCase() as PaymentMethod, currency: String(req.body?.currency ?? '').toUpperCase() as PaymentCurrency, idempotencyKey: typeof idempotencyKey === 'string' ? idempotencyKey : '', destination: typeof req.body?.destination === 'string' ? req.body.destination : '', asset: typeof req.body?.asset === 'string' ? req.body.asset : undefined, network: typeof req.body?.network === 'string' ? req.body.network : undefined, requestId });
+    res.status(201).json({ transaction });
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : 'Withdrawal request failed' });
+  }
+});
+
+app.post('/api/payments/deposits/:id/proof', requireAuth, walletWriteLimiter, async (req, res) => {
+  const transaction = getPaymentTransaction(req.params.id ?? '');
+  if (!transaction || transaction.userId !== req.userId || transaction.operation !== 'DEPOSIT') return res.status(404).json({ error: 'Payment transaction not found' });
+  try {
+    const updated = submitPaymentProof(transaction, { amount: Number(req.body?.amount), reference: typeof req.body?.reference === 'string' ? req.body.reference : '', paymentAt: Number(req.body?.paymentAt), evidenceReference: typeof req.body?.evidenceReference === 'string' ? req.body.evidenceReference : null });
+    res.status(202).json({ transaction: await paymentService.getPlayerTransaction(req.userId!, updated.id) });
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : 'Payment proof submission failed' });
+  }
+});
+
+app.get('/api/payments/transactions', requireAuth, paymentStatusLimiter, (req, res) => {
+  const operation = req.query.operation === 'DEPOSIT' || req.query.operation === 'WITHDRAWAL' ? req.query.operation : undefined;
+  res.json({ transactions: paymentService.listPlayerTransactions(req.userId!, operation) });
+});
+
+app.get('/api/payments/transactions/:id', requireAuth, paymentStatusLimiter, async (req, res) => {
+  try {
+    res.json({ transaction: await paymentService.getPlayerTransaction(req.userId!, req.params.id ?? '') });
+  } catch (error) {
+    res.status(404).json({ error: error instanceof Error ? error.message : 'Payment transaction not found' });
+  }
 });
 
 // ---------------------------------------------------------------------------

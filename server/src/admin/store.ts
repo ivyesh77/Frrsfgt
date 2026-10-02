@@ -12,6 +12,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { assertJsonStorageAllowed } from '../infrastructure/runtimeConfig.js';
 import type {
   AdminAccount,
   AdminNotification,
@@ -80,6 +81,7 @@ function emptyDb(): AdminDbShape {
 }
 
 function loadDb(): AdminDbShape {
+  assertJsonStorageAllowed('admin data');
   try {
     if (!existsSync(DATA_FILE)) return emptyDb();
     const raw = readFileSync(DATA_FILE, 'utf-8');

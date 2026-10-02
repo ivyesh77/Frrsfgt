@@ -3,7 +3,21 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "scripts": { "dev": "vite", "build": "tsc --noEmit && vite build", "preview": "vite preview" },
-  "dependencies": { "react": "^19.2.8", "react-dom": "^19.2.8", "react-router-dom": "^6.28.0" },
-  "devDependencies": { "@types/react": "^19.2.18", "@types/react-dom": "^19.2.18", "@vitejs/plugin-react": "^6.1.1", "typescript": "~6.0.2", "vite": "^8.3.0" }
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-router-dom": "^7.18.4"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.18",
+    "@vitejs/plugin-react": "^6.1.1",
+    "typescript": "~6.0.2",
+    "vite": "^8.3.0"
+  }
 }

@@ -72,6 +72,10 @@ import { listWebhookEvents } from '../payments/webhooks.js';
 import { type PaymentAdapterId, type PaymentConfig, type PaymentLimits, type PaymentOperation, type PaymentTransactionStatus } from '../payments/types.js';
 import { createOperatorAccount, toPublicOperator } from '../operator/auth.js';
 import { assignOperatorAccounts, getOperator, listOperatorAudit, listOperators, upsertOperator } from '../operator/store.js';
+import { runtimeConfig } from '../infrastructure/runtimeConfig.js';
+import { checkDurableDependencies } from '../infrastructure/jobs.js';
+import { createDistributedRateLimitStore } from '../infrastructure/redis.js';
+import { metricsText } from '../infrastructure/observability.js';
 
 export interface AdminServerDeps {
   roomManager: RoomManager;
@@ -99,7 +103,7 @@ const SERVER_STARTED_AT = Date.now();
 export function createAdminApp(deps: AdminServerDeps) {
   const { roomManager, io } = deps;
   const app = express();
-  const isProduction = process.env.NODE_ENV === 'production';
+  const isProduction = runtimeConfig.isProduction;
 
   // Same reasoning as server/src/index.ts — trust the configured number of reverse-proxy
   // hops so `req.secure` reflects the ORIGINAL client request's scheme (X-Forwarded-Proto),
@@ -153,7 +157,7 @@ export function createAdminApp(deps: AdminServerDeps) {
     return seen.size;
   }
 
-  const loginLimiter = rateLimit({ windowMs: 15 * 60_000, limit: 20, standardHeaders: true, legacyHeaders: false, handler: jsonRateLimitHandler });
+  const loginLimiter = rateLimit({ windowMs: 15 * 60_000, limit: 20, standardHeaders: true, legacyHeaders: false, handler: jsonRateLimitHandler, store: runtimeConfig.isNonLocal ? createDistributedRateLimitStore('admin-login') : undefined });
   const writeLimiter = rateLimit({ windowMs: 60_000, limit: 60, standardHeaders: true, legacyHeaders: false, handler: jsonRateLimitHandler });
   const readLimiter = rateLimit({ windowMs: 60_000, limit: 240, standardHeaders: true, legacyHeaders: false, handler: jsonRateLimitHandler });
 
@@ -171,7 +175,19 @@ export function createAdminApp(deps: AdminServerDeps) {
     });
   }
 
-  app.get('/admin/health', (_req, res) => res.json({ ok: true }));
+  app.get('/admin/metrics', async (req, res) => {
+    if (runtimeConfig.metricsToken && req.headers.authorization !== `Bearer ${runtimeConfig.metricsToken}`) return res.status(401).json({ error: 'Metrics authentication required' });
+    res.type('text/plain').send(await metricsText());
+  });
+  app.get('/admin/health/live', (_req, res) => res.json({ ok: true, status: 'LIVE', service: 'admin-api', version: runtimeConfig.buildVersion }));
+  app.get('/admin/health', (_req, res) => res.json({ ok: true, status: 'LIVE', service: 'admin-api', version: runtimeConfig.buildVersion }));
+  app.get('/admin/health/ready', async (_req, res) => {
+    if (!runtimeConfig.isNonLocal) return res.json({ ok: true, status: 'READY', environment: runtimeConfig.appEnvironment, dependencies: 'local-development-only' });
+    const dependencies = await checkDurableDependencies();
+    const ok = dependencies.database.ok && dependencies.queue.ok;
+    const safeDependencies = { database: { ok: dependencies.database.ok, latencyMs: dependencies.database.latencyMs }, queue: { ok: dependencies.queue.ok, latencyMs: dependencies.queue.latencyMs } };
+    res.status(ok ? 200 : 503).json({ ok, status: ok ? 'READY' : 'NOT_READY', environment: runtimeConfig.appEnvironment, dependencies: safeDependencies });
+  });
 
   // --- Auth ------------------------------------------------------------------------
   app.post('/admin/auth/login', loginLimiter, async (req, res) => {

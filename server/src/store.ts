@@ -15,6 +15,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { NotificationEntry, Transaction, User } from './types.js';
+import { assertJsonStorageAllowed } from './infrastructure/runtimeConfig.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, '..', 'data');
@@ -28,6 +29,7 @@ interface DbShape {
 }
 
 function loadDb(): DbShape {
+  assertJsonStorageAllowed('player ledger');
   try {
     if (!existsSync(DATA_FILE)) return { users: {}, transactions: [], notifications: [] };
     const raw = readFileSync(DATA_FILE, 'utf-8');
