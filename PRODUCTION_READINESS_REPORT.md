@@ -42,7 +42,9 @@ The audit confirmed that server-authoritative gameplay, identity-derived player 
 - Initial schema with foreign keys, unique constraints, indexes, wallet locking/version fields, idempotency/provider-event constraints, payment account assignment tables, audit events and durable job records.
 - Redis client, health check and `rate-limit-redis` distributed HTTP rate-limit store.
 - Redis and PostgreSQL durable session repository contracts with hashed token storage, expiry/sliding validation, revocation, logout invalidation and principal namespace isolation.
+- PostgreSQL game-state repository contract with row-lock queue claims and optimistic room-state versions; existing RoomManager wiring remains a blocker.
 - BullMQ webhook and operational queue contracts for reconciliation, stale transactions, notifications and alerts with deterministic SHA-256 job IDs, attempts, exponential backoff, failed-job retention, worker startup and queue health checks.
+- Prometheus/Alertmanager rule set under `ops/prometheus/alerts.yml` covering API errors, readiness, auth abuse, payment jobs/providers, reconciliation, queue backlog, worker availability and database pool pressure.
 - Protected Prometheus metrics for player/admin/operator surfaces and health/readiness/live routes for each API.
 - Deployment, migration, backup/restore, rollback and incident documentation.
 - React Router upgraded to `7.18.4` in both privileged web apps; production dependency audit is clean.

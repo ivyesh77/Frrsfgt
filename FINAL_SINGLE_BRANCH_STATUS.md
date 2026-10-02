@@ -73,12 +73,14 @@ Detailed mapping is in `FINAL_BRANCH_CONSOLIDATION.md`.
 - `server/src/infrastructure/database.ts`
 - `server/src/infrastructure/redis.ts`
 - `server/src/infrastructure/sessionBackend.ts`
+- `server/src/infrastructure/gameStateRepository.ts`
 - `server/src/infrastructure/jobs.ts`
 - `server/src/infrastructure/observability.ts`
 - `server/migrations/001_production_schema.sql`
 - `server/scripts/migrate.ts`
 - `server/scripts/worker.ts`
 - `server/.env.example`
+- `ops/prometheus/alerts.yml`
 - `PRODUCTION_DEPLOYMENT.md`
 - `PRODUCTION_DATA_MIGRATION.md`
 - `PRODUCTION_READINESS_TASK_BOARD.md`
@@ -115,7 +117,8 @@ Implemented contracts:
 - Redis/PostgreSQL hashed durable session contracts;
 - BullMQ queues with deterministic IDs, retry/backoff and failed-job retention;
 - operational queue contracts for reconciliation, stale transactions, notifications and alerts;
-- Prometheus metrics and protected endpoints;
+- PostgreSQL game-state repository contract with row-lock claims and optimistic state versions;
+- Prometheus metrics, protected endpoints and an Alertmanager rule set under `ops/prometheus/alerts.yml`;
 - player/admin/operator liveness and readiness endpoints;
 - deployment, secret, backup, restore and rollback documentation.
 
@@ -149,7 +152,7 @@ Preserved and verified:
 
 **Baseline complete for DEV/TEST:** signup, login, refresh/session restoration, logout, wallet, notifications, history, stats, matchmaking, 1v1 and 4-player gameplay, reconnect/forfeit/timeout behavior and server-authoritative scoring.
 
-**Production blocker:** rooms, matchmaking, timers, reconnect state and match state remain process-local until durable game repositories/leases/versioning are wired.
+**Production blocker:** `gameStateRepository.ts` supplies lock/version primitives, but the current RoomManager, authoritative timers, reconnect state and matchmaking flow remain process-local until those primitives are wired with leases/realtime coordination.
 
 ## Admin status
 

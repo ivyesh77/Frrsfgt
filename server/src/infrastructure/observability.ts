@@ -1,4 +1,4 @@
-import { Counter, Histogram, Registry, collectDefaultMetrics } from 'prom-client';
+import { Counter, Gauge, Histogram, Registry, collectDefaultMetrics } from 'prom-client';
 
 export const metricsRegistry = new Registry();
 collectDefaultMetrics({ register: metricsRegistry, prefix: 'wager_arena_' });
@@ -8,6 +8,13 @@ export const httpRequestDuration = new Histogram({ name: 'wager_arena_http_reque
 export const authFailuresTotal = new Counter({ name: 'wager_arena_auth_failures_total', help: 'Authentication and authorization failures', labelNames: ['surface', 'reason'] as const, registers: [metricsRegistry] });
 export const paymentEventsTotal = new Counter({ name: 'wager_arena_payment_events_total', help: 'Payment state and webhook events', labelNames: ['event', 'provider', 'status'] as const, registers: [metricsRegistry] });
 export const jobFailuresTotal = new Counter({ name: 'wager_arena_job_failures_total', help: 'Durable job failures', labelNames: ['queue', 'job_type'] as const, registers: [metricsRegistry] });
+export const queueWaitingJobs = new Gauge({ name: 'wager_arena_queue_waiting_jobs', help: 'Waiting durable jobs across monitored queues', registers: [metricsRegistry] });
+export const reconciliationOpenRecords = new Gauge({ name: 'wager_arena_reconciliation_open_records', help: 'Open reconciliation records awaiting disposition', registers: [metricsRegistry] });
+export const databasePoolWaitingClients = new Gauge({ name: 'wager_arena_database_pool_waiting_clients', help: 'Clients waiting for a PostgreSQL pool connection', registers: [metricsRegistry] });
+
+export function setReconciliationOpenRecords(count: number): void {
+  reconciliationOpenRecords.set(Math.max(0, count));
+}
 
 export function requestMetrics(surface: string) {
   return function recordRequest(method: string, route: string, status: number, durationMs: number): void {

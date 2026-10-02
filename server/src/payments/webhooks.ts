@@ -4,6 +4,7 @@ import { resolvePaymentSecret } from './secrets.js';
 import { applyProviderUpdate, existingProviderEvent, markProviderEventFailed, markProviderEventProcessed, providerConfigForTransaction, providerEventToRecord, providerTransaction } from './service.js';
 import { addProviderEvent, decrementAdapterPending, listPaymentAdapters, listProviderEvents, recordAdapterTransaction } from './store.js';
 import type { PaymentTransaction, ProviderEvent } from './types.js';
+import { paymentEventsTotal } from '../infrastructure/observability.js';
 
 function hashBody(rawBody: string): string {
   return createHash('sha256').update(rawBody).digest('hex');
@@ -47,9 +48,11 @@ export async function processProviderWebhook(provider: string, rawBody: string, 
       if (updated.status === 'COMPLETED') recordAdapterTransaction(updated.adapterId, 'success');
       else if (updated.status !== 'REVERSED') recordAdapterTransaction(updated.adapterId, 'failure');
     }
+    paymentEventsTotal.inc({ event: parsed.eventType, provider, status: updated.status });
     return { accepted: true, duplicate: false, eventId: parsed.providerEventId, transaction: updated, message: 'Provider event processed' };
   } catch (error) {
     markProviderEventFailed(event, error instanceof Error ? error.message : 'Provider event processing failed');
+    paymentEventsTotal.inc({ event: parsed.eventType, provider, status: 'FAILED' });
     throw error;
   }
 }

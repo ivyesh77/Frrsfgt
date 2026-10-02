@@ -3,6 +3,7 @@ import { Queue, QueueEvents, Worker, type ConnectionOptions, type Job, type Jobs
 import { processProviderWebhook } from '../payments/webhooks.js';
 import { checkDatabase } from './database.js';
 import { runtimeConfig } from './runtimeConfig.js';
+import { jobFailuresTotal, queueWaitingJobs } from './observability.js';
 
 export const PAYMENT_WEBHOOK_QUEUE = 'payment-webhooks';
 export const PAYMENT_RECONCILIATION_QUEUE = 'payment-reconciliation';
@@ -96,6 +97,7 @@ export async function checkJobQueue(): Promise<{ ok: boolean; latencyMs: number;
     assertBullMq();
     if (!queueEvents) queueEvents = new QueueEvents(PAYMENT_WEBHOOK_QUEUE, { connection: redisConnection(), prefix: process.env.JOB_QUEUE_PREFIX ?? 'wager-arena' });
     await queueEvents.waitUntilReady();
+    queueWaitingJobs.set(await getWebhookQueue().getWaitingCount());
     return { ok: true, latencyMs: Date.now() - started };
   } catch (error) {
     return { ok: false, latencyMs: Date.now() - started, error: error instanceof Error ? error.message : 'queue check failed' };
@@ -114,7 +116,10 @@ export async function createWebhookWorker(): Promise<Worker<ProviderWebhookJob>>
     prefix: process.env.JOB_QUEUE_PREFIX ?? 'wager-arena',
     concurrency: Number(process.env.WEBHOOK_WORKER_CONCURRENCY ?? 10),
   });
-  worker.on('failed', (job, error) => console.error(JSON.stringify({ level: 'error', event: 'job.failed', queue: PAYMENT_WEBHOOK_QUEUE, jobId: job?.id, attemptsMade: job?.attemptsMade, message: error.message })));
+  worker.on('failed', (job, error) => {
+    jobFailuresTotal.inc({ queue: PAYMENT_WEBHOOK_QUEUE, job_type: job?.name ?? 'unknown' });
+    console.error(JSON.stringify({ level: 'error', event: 'job.failed', queue: PAYMENT_WEBHOOK_QUEUE, jobId: job?.id, attemptsMade: job?.attemptsMade, message: error.message }));
+  });
   return worker;
 }
 

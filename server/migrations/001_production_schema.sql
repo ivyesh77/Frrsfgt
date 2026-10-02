@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS rooms (
   entry_fee NUMERIC(20, 4) NOT NULL CHECK (entry_fee >= 0),
   status TEXT NOT NULL,
   state JSONB NOT NULL DEFAULT '{}'::jsonb,
+  state_version BIGINT NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

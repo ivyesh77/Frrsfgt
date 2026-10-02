@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Pool, type PoolClient, type QueryResult, type QueryResultRow } from 'pg';
 import { runtimeConfig } from './runtimeConfig.js';
+import { databasePoolWaitingClients } from './observability.js';
 
 let pool: Pool | null = null;
 
@@ -29,7 +30,9 @@ export function getDatabasePool(): Pool {
 export async function checkDatabase(): Promise<{ ok: boolean; latencyMs: number; error?: string }> {
   const started = Date.now();
   try {
-    await getDatabasePool().query('SELECT 1');
+    const database = getDatabasePool();
+    await database.query('SELECT 1');
+    databasePoolWaitingClients.set(database.waitingCount);
     return { ok: true, latencyMs: Date.now() - started };
   } catch (error) {
     return { ok: false, latencyMs: Date.now() - started, error: error instanceof Error ? error.message : 'database check failed' };

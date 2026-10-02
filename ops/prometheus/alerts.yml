@@ -1,0 +1,74 @@
+# Production alert rules. Load through the approved Prometheus/Alertmanager deployment.
+# Every alert must have an owner and runbook URL in the deployment configuration.
+groups:
+  - name: wager-arena-api
+    rules:
+      - alert: WagerArenaApiErrorRateHigh
+        expr: sum(rate(wager_arena_http_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(wager_arena_http_requests_total[5m])), 1) > 0.02
+        for: 10m
+        labels: { severity: critical, service: api }
+        annotations:
+          summary: API 5xx error rate is above 2 percent
+          runbook: https://runbooks.example.invalid/wager-arena/api-errors
+      - alert: WagerArenaApiReadinessFailure
+        expr: absent(up{job="wager-arena-api"}) or up{job="wager-arena-api"} == 0
+        for: 5m
+        labels: { severity: critical, service: api }
+        annotations:
+          summary: API scrape target is unavailable or not ready
+          runbook: https://runbooks.example.invalid/wager-arena/readiness
+      - alert: WagerArenaAuthFailureSpike
+        expr: sum(rate(wager_arena_auth_failures_total[10m])) > 5
+        for: 10m
+        labels: { severity: warning, service: auth }
+        annotations:
+          summary: Authentication or authorization failures are spiking
+          runbook: https://runbooks.example.invalid/wager-arena/auth-abuse
+
+  - name: wager-arena-payments
+    rules:
+      - alert: WagerArenaPaymentJobFailures
+        expr: sum(rate(wager_arena_job_failures_total[10m])) > 0
+        for: 5m
+        labels: { severity: critical, service: payments }
+        annotations:
+          summary: Durable payment jobs are failing
+          runbook: https://runbooks.example.invalid/wager-arena/payment-jobs
+      - alert: WagerArenaProviderFailureSpike
+        expr: sum(rate(wager_arena_payment_events_total{status=~"FAILED|REVERSED"}[10m])) > 0.2
+        for: 10m
+        labels: { severity: warning, service: payments }
+        annotations:
+          summary: Provider failures or reversals exceed the expected rate
+          runbook: https://runbooks.example.invalid/wager-arena/provider-outage
+      - alert: WagerArenaReconciliationBacklog
+        expr: wager_arena_reconciliation_open_records > 0
+        for: 15m
+        labels: { severity: critical, service: reconciliation }
+        annotations:
+          summary: Unresolved payment reconciliation records are open
+          runbook: https://runbooks.example.invalid/wager-arena/reconciliation
+
+  - name: wager-arena-infrastructure
+    rules:
+      - alert: WagerArenaQueueBacklog
+        expr: wager_arena_queue_waiting_jobs > 100
+        for: 10m
+        labels: { severity: warning, service: queue }
+        annotations:
+          summary: Durable queue backlog is growing
+          runbook: https://runbooks.example.invalid/wager-arena/queue-backlog
+      - alert: WagerArenaWorkerDown
+        expr: absent(up{job="wager-arena-worker"}) or up{job="wager-arena-worker"} == 0
+        for: 5m
+        labels: { severity: critical, service: worker }
+        annotations:
+          summary: Payment worker is unavailable
+          runbook: https://runbooks.example.invalid/wager-arena/worker-down
+      - alert: WagerArenaDatabasePoolExhaustion
+        expr: wager_arena_database_pool_waiting_clients > 0
+        for: 10m
+        labels: { severity: warning, service: database }
+        annotations:
+          summary: API clients are waiting for database connections
+          runbook: https://runbooks.example.invalid/wager-arena/database-pool
